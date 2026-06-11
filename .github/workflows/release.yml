@@ -1,0 +1,373 @@
+name: release
+
+# Pre-built parakeet-cli bundles for every release (issue #21).
+#
+# One self-contained binary per (platform, backend) pair, packaged with the
+# LICENSE and README. BUILD_SHARED_LIBS=OFF folds the ggml backends into the
+# binary (the docker images keep them shared; a download-and-run bundle should
+# not need a lib directory). GGML_NATIVE=OFF keeps the binaries portable
+# across CPUs, same as the docker images and ci.yml.
+#
+# Variants:
+#   linux   x64: cpu, vulkan, cuda      arm64: cpu
+#   macos   arm64: metal                x64: cpu (cross-compiled on the arm
+#                                       runner; GitHub is retiring Intel ones)
+#   windows x64: cpu, vulkan, cuda
+#
+# CUDA notes (same reasoning as docker.yml): GGML_CUDA_NO_VMM=ON because the
+# build runners have no GPU driver to link libcuda against. Linux uses the
+# CUDA 13 apt repo so Blackwell (sm_120) is covered; the cudart/cublas
+# runtime libraries are bundled into the tarball next to the binary, which
+# carries an $ORIGIN rpath. Windows ships them as a separate cudart zip
+# (llama.cpp convention) so users who already have the toolkit skip a large
+# download.
+#
+# Triggers: pushing a v* tag builds everything and attaches the bundles to
+# the GitHub release for that tag (creating a draft release if none exists
+# yet, so creating the release before or after pushing the tag both work).
+# workflow_dispatch builds the same bundles and leaves them as workflow
+# artifacts, useful for testing changes to this file.
+
+on:
+  push:
+    tags: ['v*']
+    branches: [feat/release-binaries]  # TEMP: matrix validation, remove before merge
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # linux: cpu (x64 + arm64, native runners), vulkan (LunarG SDK), cuda
+  # (CUDA 13 apt repo). cpu/vulkan build on ubuntu-22.04 for a wider glibc
+  # range; cuda needs the ubuntu2404 CUDA repo.
+  # ---------------------------------------------------------------------------
+  build-linux:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            arch: x64
+            runner: ubuntu-22.04
+            cmake_args: ""
+            cuda_archs: ""
+          - backend: cpu
+            arch: arm64
+            runner: ubuntu-22.04-arm
+            cmake_args: ""
+            cuda_archs: ""
+          - backend: vulkan
+            arch: x64
+            runner: ubuntu-22.04
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
+            cuda_archs: ""
+          - backend: cuda
+            arch: x64
+            runner: ubuntu-24.04
+            cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
+            # CUDA 13 supports Turing and newer; 120-virtual gives PTX for
+            # whatever comes after Blackwell.
+            cuda_archs: "75-real;80-real;86-real;89-real;90-real;120-real;120-virtual"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Vulkan SDK (LunarG)
+        if: matrix.backend == 'vulkan'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+            https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install CUDA toolkit 13
+        if: matrix.backend == 'cuda'
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-13-0
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        env:
+          CUDA_ARCHS: ${{ matrix.cuda_archs }}
+        run: |
+          EXTRA=""
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            # $ORIGIN rpath so the bundled cudart/cublas next to the binary
+            # are found without LD_LIBRARY_PATH.
+            EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
+          fi
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }} \
+            ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
+            ${EXTRA:+"$EXTRA"}
+
+      - name: Build
+        run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Smoke test (usage banner)
+        run: ./build/examples/cli/parakeet-cli 2>&1 | grep -qi usage
+
+      - name: Package
+        id: pack
+        run: |
+          BUNDLE="parakeet-${{ steps.ver.outputs.version }}-bin-linux-${{ matrix.backend }}-${{ matrix.arch }}"
+          mkdir "$BUNDLE"
+          cp build/examples/cli/parakeet-cli LICENSE README.md "$BUNDLE"/
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
+                  /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
+                  /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
+                  "$BUNDLE"/
+          fi
+          tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.bundle }}
+          path: ${{ steps.pack.outputs.bundle }}.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # macos: metal on arm64 (the metallib is embedded in the binary, nothing to
+  # ship alongside), plus a cpu-only x64 build cross-compiled on the same
+  # arm64 runner.
+  # ---------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: metal
+            arch: arm64
+            cmake_args: "-DPARAKEET_GGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON"
+          - backend: cpu
+            arch: x64
+            cmake_args: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Smoke test (usage banner)
+        # The x64 binary needs Rosetta; only smoke test the native build.
+        if: matrix.arch == 'arm64'
+        run: ./build/examples/cli/parakeet-cli 2>&1 | grep -qi usage
+
+      - name: Package
+        id: pack
+        run: |
+          BUNDLE="parakeet-${{ steps.ver.outputs.version }}-bin-macos-${{ matrix.backend }}-${{ matrix.arch }}"
+          mkdir "$BUNDLE"
+          cp build/examples/cli/parakeet-cli LICENSE README.md "$BUNDLE"/
+          tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.bundle }}
+          path: ${{ steps.pack.outputs.bundle }}.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # windows: MSVC via Ninja (ilammy/msvc-dev-cmd provides the cl environment,
+  # which also lets nvcc use cl without the Visual Studio CUDA integration).
+  # The ggml patches are applied explicitly under Git Bash first: CMake's
+  # find_program(bash) can pick up the stub WSL bash.exe in System32, which
+  # would skip the patches with only a warning.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            cmake_args: ""
+            cuda_archs: ""
+          - backend: vulkan
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
+            cuda_archs: ""
+          - backend: cuda
+            cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
+            # CUDA 12.8 (sm_120 support starts there; CUDA 13 is not in the
+            # cuda-toolkit action yet).
+            cuda_archs: "75-real;80-real;86-real;89-real;90-real;120-real"
+    env:
+      VULKAN_VERSION: 1.4.321.1
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply ggml patches (Git Bash)
+        run: bash scripts/apply_ggml_patches.sh
+
+      - name: Install Vulkan SDK
+        if: matrix.backend == 'vulkan'
+        shell: pwsh
+        run: |
+          curl.exe -L -o vulkan-sdk.exe "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -Wait -FilePath .\vulkan-sdk.exe -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install'
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" | Out-File -Append $env:GITHUB_ENV
+          "C:\VulkanSDK\$env:VULKAN_VERSION\Bin" | Out-File -Append $env:GITHUB_PATH
+
+      - name: Install CUDA toolkit
+        if: matrix.backend == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: '12.8.0'
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev", "thrust"]'
+          use-github-cache: true
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        env:
+          CUDA_ARCHS: ${{ matrix.cuda_archs }}
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DPARAKEET_BUILD_CLI=ON \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }} \
+            ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
+
+      - name: Build
+        run: cmake --build build -j
+
+      - name: Smoke test (usage banner)
+        # The vulkan binary needs vulkan-1.dll, which the SDK install provides
+        # on the runner; cpu and cuda load on a bare machine.
+        run: ./build/examples/cli/parakeet-cli.exe 2>&1 | grep -qi usage
+
+      - name: Package
+        id: pack
+        shell: pwsh
+        run: |
+          $bundle = "parakeet-${{ steps.ver.outputs.version }}-bin-win-${{ matrix.backend }}-x64"
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          Copy-Item build/examples/cli/parakeet-cli.exe,LICENSE,README.md $bundle/
+          Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
+          "bundle=$bundle" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.bundle }}
+          path: ${{ steps.pack.outputs.bundle }}.zip
+          if-no-files-found: error
+
+      - name: Package CUDA runtime DLLs
+        if: matrix.backend == 'cuda'
+        shell: pwsh
+        run: |
+          $name = "cudart-parakeet-bin-win-cuda-x64"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "$env:CUDA_PATH\bin\cudart64*.dll","$env:CUDA_PATH\bin\cublas64*.dll","$env:CUDA_PATH\bin\cublasLt64*.dll" $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+
+      - name: Upload CUDA runtime artifact
+        if: matrix.backend == 'cuda'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cudart-parakeet-bin-win-cuda-x64
+          path: cudart-parakeet-bin-win-cuda-x64.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # release: attach every bundle to the GitHub release for the tag. Creates a
+  # draft release if none exists yet, so the usual create-release-with-notes
+  # flow keeps working whether it happens before or after the tag push.
+  # ---------------------------------------------------------------------------
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "$TAG" --notes "Pre-built binaries for $TAG"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
