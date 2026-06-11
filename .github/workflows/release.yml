@@ -31,7 +31,6 @@ name: release
 on:
   push:
     tags: ['v*']
-    branches: [feat/release-binaries]  # TEMP: matrix validation, remove before merge
   workflow_dispatch:
 
 defaults:
