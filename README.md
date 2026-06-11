@@ -72,6 +72,20 @@ GPU numbers (NVIDIA GB10, Grace-Blackwell, vs NeMo-GPU in the `nvcr.io/nvidia/ne
 
 ---
 
+## Pre-built binaries
+
+Every [release](https://github.com/mudler/parakeet.cpp/releases) ships pre-built `parakeet-cli` bundles, so there is no need to compile from source:
+
+| Platform | Variants |
+| -------- | -------- |
+| Linux x64 | cpu, vulkan, cuda |
+| Linux arm64 | cpu |
+| macOS arm64 | metal |
+| macOS x64 | cpu |
+| Windows x64 | cpu, vulkan, cuda |
+
+The cuda bundles target Turing (sm_75) and newer, including Blackwell. On Linux the CUDA runtime libraries are bundled in the tarball; on Windows download the `cudart-parakeet-bin-win-cuda-x64.zip` asset alongside the binary zip unless you already have the CUDA toolkit installed. The vulkan binaries need the Vulkan loader on the system (`libvulkan1` on Debian/Ubuntu; on Windows the GPU driver provides it).
+
 ## Build
 
 Clone with submodules (ggml is vendored at `third_party/ggml`):
