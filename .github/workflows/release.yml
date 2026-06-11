@@ -31,6 +31,7 @@ name: release
 on:
   push:
     tags: ['v*']
+    branches: [feat/release-binaries]  # TEMP: matrix validation, remove before merge
   workflow_dispatch:
 
 defaults:
@@ -68,10 +69,11 @@ jobs:
           - backend: cuda
             arch: x64
             runner: ubuntu-24.04
+            # No CMAKE_CUDA_ARCHITECTURES: ggml's curated default applies,
+            # the same list llama.cpp releases ship (PTX for the datacenter
+            # gens, real code for 86/89/120a, plus 121a for GB10 on CUDA 13).
             cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
-            # CUDA 13 supports Turing and newer; 120-virtual gives PTX for
-            # whatever comes after Blackwell.
-            cuda_archs: "75-real;80-real;86-real;89-real;90-real;120-real;120-virtual"
+            cuda_archs: ""
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -248,10 +250,11 @@ jobs:
             cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
             cuda_archs: ""
           - backend: cuda
+            # CUDA 12.8: sm_120 support starts there (CUDA 13 is not in the
+            # cuda-toolkit action yet). No CMAKE_CUDA_ARCHITECTURES: ggml's
+            # curated default applies, same as the llama.cpp releases.
             cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
-            # CUDA 12.8 (sm_120 support starts there; CUDA 13 is not in the
-            # cuda-toolkit action yet).
-            cuda_archs: "75-real;80-real;86-real;89-real;90-real;120-real"
+            cuda_archs: ""
     env:
       VULKAN_VERSION: 1.4.321.1
     steps:
