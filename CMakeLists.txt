@@ -20,6 +20,14 @@ set(GGML_METAL   ${PARAKEET_GGML_METAL}  CACHE BOOL "" FORCE)
 set(GGML_VULKAN  ${PARAKEET_GGML_VULKAN} CACHE BOOL "" FORCE)
 set(GGML_HIP ${PARAKEET_GGML_HIP} CACHE BOOL "" FORCE)
 
+# CUDA graphs: ggml defaults this OFF, but on CUDA builds it captures/replays the
+# compute graph for a small free speedup (~1% measured on GB10, never negative).
+# Turn it on whenever we forward CUDA so every CUDA build (docker/release/local)
+# gets it. The runtime kill-switch GGML_CUDA_DISABLE_GRAPHS=1 still works.
+if(PARAKEET_GGML_CUDA)
+  set(GGML_CUDA_GRAPHS ON CACHE BOOL "" FORCE)
+endif()
+
 # Performance: -march=native (GGML_NATIVE) and tinyBLAS SGEMM (GGML_LLAMAFILE)
 # give meaningful free speedups (~30% and ~25% per the rt-detr.cpp benchmarks).
 # Force them on unless the caller explicitly overrides.
