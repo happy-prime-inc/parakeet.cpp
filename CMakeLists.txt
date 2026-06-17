@@ -92,6 +92,11 @@ set(PARAKEET_SRC
 
 if(PARAKEET_SHARED)
   add_library(parakeet SHARED ${PARAKEET_SRC})
+  # The C-API header marks symbols with plain extern "C", no __declspec(dllexport).
+  # On MSVC that yields a DLL with no exported symbols (and no import .lib), which
+  # is useless for dlopen/ctypes consumers. Auto-export every symbol so the DLL is
+  # usable the same way the ELF/Mach-O shared libs are. No effect on Linux/macOS.
+  set_target_properties(parakeet PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 else()
   add_library(parakeet STATIC ${PARAKEET_SRC})
 endif()

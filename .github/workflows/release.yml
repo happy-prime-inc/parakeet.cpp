@@ -160,6 +160,54 @@ jobs:
           path: ${{ steps.pack.outputs.bundle }}.tar.gz
           if-no-files-found: error
 
+      # Shared C-API lib (issue #25): a separate build so the CLI bundle above
+      # stays a single self-contained binary. PARAKEET_SHARED=ON folds ggml into
+      # libparakeet.so the same way it is folded into the CLI.
+      - name: Configure (shared C-API lib)
+        env:
+          CUDA_ARCHS: ${{ matrix.cuda_archs }}
+        run: |
+          EXTRA=""
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
+          fi
+          cmake -B build-shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DPARAKEET_SHARED=ON \
+            -DPARAKEET_BUILD_CLI=OFF \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }} \
+            ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
+            ${EXTRA:+"$EXTRA"}
+
+      - name: Build (shared C-API lib)
+        run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Package (shared C-API lib)
+        id: pack_lib
+        run: |
+          BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
+          mkdir "$BUNDLE"
+          cp build-shared/libparakeet.so include/parakeet_capi.h LICENSE README.md "$BUNDLE"/
+          if [ "${{ matrix.backend }}" = "cuda" ]; then
+            cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
+                  /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
+                  /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
+                  "$BUNDLE"/
+          fi
+          tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload shared C-API lib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_lib.outputs.bundle }}
+          path: ${{ steps.pack_lib.outputs.bundle }}.tar.gz
+          if-no-files-found: error
+
   # ---------------------------------------------------------------------------
   # macos: metal on arm64 (the metallib is embedded in the binary, nothing to
   # ship alongside), plus a cpu-only x64 build cross-compiled on the same
@@ -227,6 +275,38 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.bundle }}
           path: ${{ steps.pack.outputs.bundle }}.tar.gz
+          if-no-files-found: error
+
+      # Shared C-API lib (issue #25). Separate build, same reasoning as linux.
+      - name: Configure (shared C-API lib)
+        run: |
+          cmake -B build-shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DPARAKEET_SHARED=ON \
+            -DPARAKEET_BUILD_CLI=OFF \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }}
+
+      - name: Build (shared C-API lib)
+        run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
+
+      - name: Package (shared C-API lib)
+        id: pack_lib
+        run: |
+          BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-macos-${{ matrix.backend }}-${{ matrix.arch }}"
+          mkdir "$BUNDLE"
+          cp build-shared/libparakeet.dylib include/parakeet_capi.h LICENSE README.md "$BUNDLE"/
+          tar -czf "$BUNDLE.tar.gz" "$BUNDLE"
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload shared C-API lib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_lib.outputs.bundle }}
+          path: ${{ steps.pack_lib.outputs.bundle }}.tar.gz
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -334,6 +414,44 @@ jobs:
         with:
           name: ${{ steps.pack.outputs.bundle }}
           path: ${{ steps.pack.outputs.bundle }}.zip
+          if-no-files-found: error
+
+      # Shared C-API lib (issue #25). Separate build, same reasoning as linux.
+      # WINDOWS_EXPORT_ALL_SYMBOLS (set in CMakeLists) makes the DLL export its
+      # extern "C" entry points so ctypes/dlopen can find them.
+      - name: Configure (shared C-API lib)
+        env:
+          CUDA_ARCHS: ${{ matrix.cuda_archs }}
+        run: |
+          cmake -B build-shared -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_NATIVE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DPARAKEET_SHARED=ON \
+            -DPARAKEET_BUILD_CLI=OFF \
+            -DPARAKEET_BUILD_TESTS=OFF \
+            ${{ matrix.cmake_args }} \
+            ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
+
+      - name: Build (shared C-API lib)
+        run: cmake --build build-shared -j
+
+      - name: Package (shared C-API lib)
+        id: pack_lib
+        shell: pwsh
+        run: |
+          $bundle = "parakeet-${{ steps.ver.outputs.version }}-lib-win-${{ matrix.backend }}-x64"
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          Copy-Item build-shared/parakeet.dll,include/parakeet_capi.h,LICENSE,README.md $bundle/
+          Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
+          "bundle=$bundle" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Upload shared C-API lib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack_lib.outputs.bundle }}
+          path: ${{ steps.pack_lib.outputs.bundle }}.zip
           if-no-files-found: error
 
       - name: Package CUDA runtime DLLs
