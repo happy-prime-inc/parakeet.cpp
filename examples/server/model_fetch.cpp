@@ -5,8 +5,12 @@
 #include <filesystem>
 #include <stdexcept>
 
+#ifdef _WIN32
+#include <process.h>  // _spawnvp
+#else
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -107,17 +111,31 @@ std::string default_cache_dir() {
 
 // `tool` is always a hardcoded literal ("curl"/"wget"), never user input.
 static bool have_tool(const char* tool) {
+#ifdef _WIN32
+    std::string cmd = std::string("where ") + tool + " >NUL 2>NUL";
+#else
     std::string cmd = std::string("command -v ") + tool + " >/dev/null 2>&1";
+#endif
     return std::system(cmd.c_str()) == 0;
 }
 
-// Run args[0] with the given arguments directly via execvp (no shell). Returns
-// the child exit status (0 == success), or -1 if it could not be spawned.
-// Passing the URL and paths as literal argv entries means no shell metacharacter
-// in them can ever be interpreted, so an attacker-shaped URL cannot inject a
-// command (unlike building a std::system string). POSIX only, which is fine:
-// this example targets Linux and macOS.
+// Run args[0] with the given arguments directly (no shell). Returns the child
+// exit status (0 == success), or -1 if it could not be spawned. Passing the URL
+// and paths as literal argv entries means no shell metacharacter in them can
+// ever be interpreted, so an attacker-shaped URL cannot inject a command
+// (unlike building a std::system string). _spawnvp (Windows) and fork+execvp
+// (POSIX) both run the program directly without a shell, preserving that.
 static int run_argv(const std::vector<std::string>& args) {
+#ifdef _WIN32
+    std::vector<const char*> argv;
+    argv.reserve(args.size() + 1);
+    for (const auto& a : args) argv.push_back(a.c_str());
+    argv.push_back(nullptr);
+    // _P_WAIT: run synchronously and return the child's exit code. The 'p'
+    // variant searches PATH for argv[0] (so "curl" resolves to curl.exe).
+    intptr_t rc = _spawnvp(_P_WAIT, argv[0], argv.data());
+    return rc < 0 ? -1 : static_cast<int>(rc);
+#else
     std::vector<char*> argv;
     argv.reserve(args.size() + 1);
     for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
@@ -134,6 +152,7 @@ static int run_argv(const std::vector<std::string>& args) {
         if (errno != EINTR) return -1;
     }
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
 }
 
 std::string fetch_model(const ModelSource& src, const std::string& cache_dir) {
