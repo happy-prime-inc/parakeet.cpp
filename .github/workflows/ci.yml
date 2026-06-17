@@ -33,6 +33,45 @@ jobs:
         run: ctest --test-dir build --output-on-failure -LE model
 
   # -------------------------------------------------------------------------
+  # server-e2e: drive the real parakeet-server over HTTP.
+  #
+  # Runs on pull_request (merge gate) and manual workflow_dispatch. Not on every
+  # push: it downloads the ~125 MB tdt_ctc-110m-q4_k model via the alias path.
+  # Much lighter than closed-loop (no NeMo/Python venv) — it builds the server,
+  # then tests/server_e2e.sh starts it, transcribes tests/fixtures/speech.wav in
+  # json/text/verbose_json (with word timestamps), and checks the 400 paths.
+  # -------------------------------------------------------------------------
+  server-e2e:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential curl ca-certificates
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DPARAKEET_BUILD_SERVER=ON \
+            -DPARAKEET_BUILD_TESTS=ON \
+            -DGGML_NATIVE=OFF
+
+      - name: Build parakeet-server
+        run: cmake --build build --target parakeet-server -j
+
+      - name: Run server e2e
+        # PARAKEET_SERVER_E2E=1 flips the test from skip (77) to a real run.
+        env:
+          PARAKEET_SERVER_E2E: "1"
+        run: ctest --test-dir build --output-on-failure -R '^server_e2e$'
+
+  # -------------------------------------------------------------------------
   # closed-loop: full end-to-end transcript assertion.
   #
   # Runs on pull_request (merge gate) and manual workflow_dispatch. Not on every
