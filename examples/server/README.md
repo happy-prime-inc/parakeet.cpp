@@ -7,6 +7,11 @@ Point any OpenAI client's `base_url` at it and call
 This is an example, not a production service. It serves one model, runs one
 transcription at a time, and accepts WAV uploads only.
 
+For a production deployment, use [LocalAI](https://localai.io), which embeds
+parakeet.cpp as a backend and adds the things this example deliberately leaves
+out: a model gallery, concurrency, multi-model serving, the full OpenAI API
+surface, auth, and metrics.
+
 ## Build
 
 Built by default with the rest of the project (`PARAKEET_BUILD_SERVER=ON`):

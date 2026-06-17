@@ -128,26 +128,35 @@ The CLI auto-selects the first GPU device the ggml registry reports (including i
 
 ## Docker
 
-Prebuilt images are published to GitHub Container Registry on every push to `master`. They contain just the `parakeet-cli` binary, so mount a converted `.gguf` model and your audio at runtime. Both the CPU and CUDA images are multi-arch (`linux/amd64` and `linux/arm64`), so the right one is pulled for your host automatically:
+Two prebuilt images are published to GitHub Container Registry on every push to `master`, one per binary:
+
+- `ghcr.io/mudler/parakeet.cpp-cli`: the command-line transcriber.
+- `ghcr.io/mudler/parakeet.cpp-server`: the [OpenAI-compatible server](#openai-compatible-server).
+
+Each comes in a CPU and a CUDA variant (the CUDA tag is suffixed `-cuda`), and both are multi-arch (`linux/amd64` and `linux/arm64`), so the right one is pulled for your host automatically. They contain just the binary, so mount a converted `.gguf` model (and, for the cli, your audio) at runtime:
 
 ```sh
-# CPU
+# CLI, CPU
 docker run --rm \
   -v "$PWD/models:/models:ro" \
   -v "$PWD/audio:/audio:ro" \
   ghcr.io/mudler/parakeet.cpp-cli:latest \
   transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
 
-# CUDA (needs the nvidia container toolkit on the host)
+# CLI, CUDA (needs the nvidia container toolkit on the host)
 docker run --rm --gpus all \
   -v "$PWD/models:/models:ro" -v "$PWD/audio:/audio:ro" \
   ghcr.io/mudler/parakeet.cpp-cli:latest-cuda \
   transcribe --model /models/parakeet-tdt_ctc-110m-q5_k.gguf --input /audio/speech.wav --decoder tdt
+
+# Server: binds 0.0.0.0 and exposes 8080. Fetch a model by alias on first run,
+# or mount a local .gguf. Add --gpus all with the :latest-cuda tag for GPU.
+docker run --rm -p 8080:8080 ghcr.io/mudler/parakeet.cpp-server:latest --model tdt_ctc-110m
 ```
 
 The CUDA image is built on CUDA 13, so it covers everything from Turing up through Blackwell, including GB10 / Grace-Blackwell (DGX Spark) on arm64.
 
-To build the image yourself, see the build args at the top of the [`Dockerfile`](Dockerfile). The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any amd64 or arm64 host.
+To build the images yourself, see the build args at the top of the [`Dockerfile`](Dockerfile); the cli is the default target and the server is `--target runtime-server`. The CPU image is the portable `GGML_NATIVE=OFF` build, so it runs on any amd64 or arm64 host.
 
 ---
 
@@ -237,6 +246,39 @@ parakeet-cli transcribe --model eou.gguf --input audio.wav --stream
 Timestamps and confidence match NeMo's `transcribe(timestamps=True)` with the `max_prob` confidence method exactly (word offsets to 0.0 s, per-token and per-word confidence within `5e-6`), for both the TDT and CTC heads. See `docs/parity.md`. Word start and end are in seconds (`frame x hop x subsampling / sample_rate`, which works out to 0.08 s/frame here); confidence is the rescaled softmax probability of the emitted token, aggregated per word with NeMo's `min`.
 
 The `parakeet-cli` binary lands at `build/examples/cli/parakeet-cli`.
+
+---
+
+## OpenAI-compatible server
+
+`parakeet-server` is a small HTTP server that speaks the OpenAI transcription
+API, so any OpenAI client works by pointing its `base_url` at it. It is built by
+default (`PARAKEET_BUILD_SERVER=ON`) and lands at `build/examples/server/parakeet-server`.
+
+```sh
+# Serve a model. --model takes a local .gguf, an http(s) URL, a <name>.gguf in
+# mudler/parakeet-cpp-gguf, or an alias (downloaded and cached on first run).
+parakeet-server --model tdt_ctc-110m --port 8080
+
+# Transcribe over HTTP
+curl -F file=@audio.wav -F response_format=verbose_json \
+  http://localhost:8080/v1/audio/transcriptions
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+with open("audio.wav", "rb") as f:
+    print(client.audio.transcriptions.create(model="parakeet", file=f).text)
+```
+
+It supports `response_format` `json` / `text` / `verbose_json` and
+`timestamp_granularities[]=word`. This is a single-model, one-request-at-a-time
+example that accepts WAV uploads only; see [`examples/server/README.md`](examples/server/README.md)
+for the full list of options and known simplifications. **For a production
+deployment, use [LocalAI](https://localai.io)**, which embeds parakeet.cpp as a
+backend and adds a model gallery, concurrency, multi-model serving, the full
+OpenAI API surface, auth, and metrics.
 
 ---
 
