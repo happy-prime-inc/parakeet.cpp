@@ -65,6 +65,37 @@ pk_add_test(test_capi_stream)
 pk_add_test(test_capi_stream_json)
 pk_add_test(test_capi_timestamps)
 pk_add_test(test_capi_batch_json)
+
+# Server example unit tests: compile the example's pure units directly
+# (they are not part of libparakeet). No model or network needed.
+add_executable(test_server_format test_server_format.cpp
+               ${CMAKE_SOURCE_DIR}/examples/server/openai_format.cpp)
+target_include_directories(test_server_format PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/examples/server
+    ${CMAKE_SOURCE_DIR}/third_party)
+target_link_libraries(test_server_format PRIVATE parakeet)
+add_test(NAME test_server_format COMMAND test_server_format)
+set_tests_properties(test_server_format PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(test_server_resolve test_server_resolve.cpp
+               ${CMAKE_SOURCE_DIR}/examples/server/model_fetch.cpp)
+target_include_directories(test_server_resolve PRIVATE
+    ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/examples/server
+    ${CMAKE_SOURCE_DIR}/third_party)
+target_link_libraries(test_server_resolve PRIVATE parakeet)
+add_test(NAME test_server_resolve COMMAND test_server_resolve
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(test_server_resolve PROPERTIES SKIP_RETURN_CODE 77)
+
+# Opt-in end-to-end test: drives the real parakeet-server binary, downloading
+# the model via its alias. Skips (77) unless PARAKEET_SERVER_E2E=1.
+if(TARGET parakeet-server)
+  add_test(NAME server_e2e
+           COMMAND ${CMAKE_SOURCE_DIR}/tests/server_e2e.sh $<TARGET_FILE:parakeet-server>
+           WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+  set_tests_properties(server_e2e PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+endif()
+
 set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling test_subsampling_batch test_subsampling_batch_causal test_relpos_attention test_relpos_attention_batch test_relpos_attention_local_chunked
                      test_conformer test_conformer_batch test_conv_eou test_encoder test_encoder_batch test_encoder_batch_local test_encoder_eou
                      test_streaming_encoder test_ctc test_prediction
