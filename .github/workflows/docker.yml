@@ -1,12 +1,17 @@
 name: docker
 
-# Build the parakeet-cli container images and publish them to GitHub Container
-# Registry (ghcr.io/<owner>/parakeet.cpp-cli).
+# Build the parakeet container images and publish them to GitHub Container
+# Registry. Two images are shipped, one per binary:
+#   ghcr.io/<owner>/parakeet.cpp-cli     the command-line transcriber
+#   ghcr.io/<owner>/parakeet.cpp-server  the OpenAI-compatible HTTP server
+# Both come from the same Dockerfile (shared build stage, different runtime
+# target), so ggml is compiled once per build job.
 #
 # Each variant (cpu, cuda) is a multi-arch image (linux/amd64 + linux/arm64).
 # Every arch is built natively on its own runner (no QEMU): amd64 on
 # ubuntu-24.04, arm64 on ubuntu-24.04-arm. The per-arch images are pushed by
-# digest, then a merge job assembles one multi-arch manifest per variant.
+# digest, then a merge job assembles one multi-arch manifest per (image,
+# variant) pair.
 #
 # The CUDA images use the CUDA 13 base so ggml compiles the Blackwell
 # architectures (sm_120 + sm_121); that is what makes the arm64 CUDA image run
@@ -25,9 +30,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Named for the binary it ships, so a future server image can live alongside
-  # it (e.g. parakeet.cpp-server). Resolves to <owner>/parakeet.cpp-cli.
-  IMAGE_NAME: ${{ github.repository }}-cli
+  # Each binary ships as its own image. Resolve to <owner>/parakeet.cpp-cli and
+  # <owner>/parakeet.cpp-server. Both are built from the same Dockerfile (shared
+  # build stage, different runtime target) in each build job below.
+  IMAGE_CLI: ${{ github.repository }}-cli
+  IMAGE_SERVER: ${{ github.repository }}-server
 
 jobs:
   # -------------------------------------------------------------------------
@@ -84,12 +91,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push by digest (${{ matrix.variant }}/${{ matrix.arch }})
-        id: build
+      # Both images come from the same Dockerfile. The cli build runs first and
+      # populates the gha cache for the shared `build` stage (which compiles
+      # ggml); the server build then reuses it via cache-from and only differs
+      # in its small runtime layer, so it is nearly free.
+      - name: Build and push cli by digest (${{ matrix.variant }}/${{ matrix.arch }})
+        id: build_cli
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
+          target: runtime
           platforms: linux/${{ matrix.arch }}
           build-args: |
             BUILD_BASE=${{ matrix.build_base }}
@@ -98,23 +110,51 @@ jobs:
             CUDA_ARCHS=${{ matrix.cuda_archs }}
           # PRs: build only (cache-only, nothing pushed). Otherwise push the
           # image by digest so the merge job can stitch the arches together.
-          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_NAME) || 'type=cacheonly' }}
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_CLI) || 'type=cacheonly' }}
           cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
 
-      - name: Export digest
+      - name: Build and push server by digest (${{ matrix.variant }}/${{ matrix.arch }})
+        id: build_server
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime-server
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            BUILD_BASE=${{ matrix.build_base }}
+            RUNTIME_BASE=${{ matrix.runtime_base }}
+            CMAKE_EXTRA_ARGS=${{ matrix.cmake_args }}
+            CUDA_ARCHS=${{ matrix.cuda_archs }}
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0}/{1},push-by-digest=true,name-canonical=true,push=true', env.REGISTRY, env.IMAGE_SERVER) || 'type=cacheonly' }}
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
+
+      - name: Export digests
         if: github.event_name != 'pull_request'
         run: |
-          mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          mkdir -p /tmp/digests/cli /tmp/digests/server
+          cli="${{ steps.build_cli.outputs.digest }}"
+          srv="${{ steps.build_server.outputs.digest }}"
+          touch "/tmp/digests/cli/${cli#sha256:}"
+          touch "/tmp/digests/server/${srv#sha256:}"
 
-      - name: Upload digest
+      - name: Upload cli digest
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
-          path: /tmp/digests/*
+          name: digests-cli-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests/cli/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload server digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-server-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests/server/*
           if-no-files-found: error
           retention-days: 1
 
@@ -131,18 +171,36 @@ jobs:
       packages: write
     strategy:
       fail-fast: false
+      # One manifest per (image, variant): cli + server, each cpu + cuda.
       matrix:
         include:
-          - variant: cpu
+          - image: cli
+            variant: cpu
             suffix: ""
-          - variant: cuda
+          - image: cli
+            variant: cuda
+            suffix: "-cuda"
+          - image: server
+            variant: cpu
+            suffix: ""
+          - image: server
+            variant: cuda
             suffix: "-cuda"
     steps:
+      - name: Resolve image name
+        id: img
+        run: |
+          if [ "${{ matrix.image }}" = "server" ]; then
+            echo "name=${{ env.IMAGE_SERVER }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ env.IMAGE_CLI }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-${{ matrix.variant }}-*
+          pattern: digests-${{ matrix.image }}-${{ matrix.variant }}-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -159,7 +217,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
           # cpu  -> latest, sha-xxxx, vX.Y.Z
           # cuda -> latest-cuda, sha-xxxx-cuda, vX.Y.Z-cuda
           flavor: |
@@ -174,9 +232,9 @@ jobs:
         run: |
           docker buildx imagetools create \
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+            $(printf '${{ env.REGISTRY }}/${{ steps.img.outputs.name }}@sha256:%s ' *)
 
       - name: Inspect manifest
         run: |
           docker buildx imagetools inspect \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest${{ matrix.suffix }}
+            ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:latest${{ matrix.suffix }}

@@ -1,8 +1,11 @@
 # parakeet.cpp container image.
 #
-# Multi-stage build: a fat build stage compiles parakeet-cli (and the ggml
-# backends it links against), then a slim runtime stage carries only the
-# binary plus the ggml shared libraries.
+# Multi-stage build: a fat build stage compiles parakeet-cli and
+# parakeet-server (and the ggml backends they link against), then slim runtime
+# stages carry only one binary plus the ggml shared libraries. Two runtime
+# targets are exposed:
+#   --target runtime         the cli image (default)
+#   --target runtime-server  the OpenAI-compatible HTTP server image
 #
 # The same Dockerfile produces the CPU and CUDA variants. Select with build
 # args:
@@ -60,21 +63,25 @@ RUN cmake -B build \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_NATIVE=OFF \
         -DPARAKEET_BUILD_CLI=ON \
+        -DPARAKEET_BUILD_SERVER=ON \
         -DPARAKEET_BUILD_TESTS=OFF \
         ${CMAKE_EXTRA_ARGS} \
         ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"} \
     && cmake --build build -j"$(nproc)"
 
-# Stage the binary and every backend shared library (CPU, and CUDA when built)
-# into a clean prefix the runtime stage can copy wholesale.
+# Stage both binaries and every backend shared library (CPU, and CUDA when
+# built) into a clean prefix the runtime stages copy from. The cli and server
+# images each pick only the binary they ship.
 RUN mkdir -p /install/bin /install/lib \
     && cp build/examples/cli/parakeet-cli /install/bin/ \
+    && cp build/examples/server/parakeet-server /install/bin/ \
     && find build -name '*.so*' -exec cp -av {} /install/lib/ \;
 
 # ---------------------------------------------------------------------------
-# runtime: slim image with just the binary and its shared libraries.
+# runtime-base: shared slim layer with the ggml backend libraries. The cli and
+# server targets below add their own binary and entrypoint on top.
 # ---------------------------------------------------------------------------
-FROM ${RUNTIME_BASE} AS runtime
+FROM ${RUNTIME_BASE} AS runtime-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -82,10 +89,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /install/bin/ /usr/local/bin/
 COPY --from=build /install/lib/ /usr/local/lib/
 RUN ldconfig
 
 WORKDIR /work
+
+# ---------------------------------------------------------------------------
+# runtime-server: the OpenAI-compatible HTTP server. Binds 0.0.0.0 so the
+# published port is reachable from outside the container; curl is added so
+# `--model <alias>` can fetch a published model on first run.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS runtime-server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /install/bin/parakeet-server /usr/local/bin/
+EXPOSE 8080
+ENTRYPOINT ["parakeet-server", "--host", "0.0.0.0"]
+CMD ["--help"]
+
+# ---------------------------------------------------------------------------
+# runtime: the cli image. Kept last so a plain `docker build .` (no --target)
+# still produces the cli image exactly as before.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS runtime
+COPY --from=build /install/bin/parakeet-cli /usr/local/bin/
 ENTRYPOINT ["parakeet-cli"]
 CMD ["--help"]

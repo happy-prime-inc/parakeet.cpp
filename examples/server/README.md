@@ -51,6 +51,22 @@ filename in the `mudler/parakeet-cpp-gguf` repo, or one of these aliases:
 Downloads use `curl` (or `wget`). If neither is on `PATH`, download the `.gguf`
 yourself and pass the local path.
 
+## Docker
+
+A prebuilt image is published per push to `ghcr.io/<owner>/parakeet.cpp-server`
+(CPU by default, `:latest-cuda` for the CUDA build). It binds `0.0.0.0` and
+exposes port 8080. Pass the same `--model` argument you would on the CLI;
+mount a local `.gguf`, or let it fetch an alias on first run:
+
+```sh
+# serve a published model by alias (downloaded into the container)
+docker run --rm -p 8080:8080 ghcr.io/mudler/parakeet.cpp-server --model tdt_ctc-110m
+
+# serve a local model (mount it read-only)
+docker run --rm -p 8080:8080 -v "$PWD/model.gguf:/model.gguf:ro" \
+  ghcr.io/mudler/parakeet.cpp-server --model /model.gguf
+```
+
 ## Call it
 
 ```sh
