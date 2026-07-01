@@ -96,14 +96,14 @@ static std::string decode_enc_out(const ModelLoader& loader,
         else
             ids = rnnt_greedy(pred, joint, enc_row, Tout, d_model,
                               (int)cfg.blank_id, max_symbols);
-        return detokenize(loader.tokenizer_pieces(), ids);
+        return detokenize(loader.tokenizer_pieces(), strip_special_tokens(loader.tokenizer_pieces(), ids));
     } else {
         CTCDecoder ctc(loader);
         std::vector<float> logits; int vocab_plus_1 = 0;
         ctc.forward(enc_out, d_model, Tout, logits, vocab_plus_1);
         std::vector<int32_t> ids = ctc_greedy(logits, Tout, vocab_plus_1,
                                               (int)cfg.blank_id);
-        return detokenize(loader.tokenizer_pieces(), ids);
+        return detokenize(loader.tokenizer_pieces(), strip_special_tokens(loader.tokenizer_pieces(), ids));
     }
 }
 
@@ -285,7 +285,8 @@ std::vector<std::string> Model::transcribe_16k_batch(
                                     cfg.tdt_durations, (int)cfg.blank_id,
                                     (int)cfg.max_symbols, ids, nullptr);
         for (int b = 0; b < mb.B; ++b)
-            outs[b] = detokenize(loader_.tokenizer_pieces(), ids[b]);
+            outs[b] = detokenize(loader_.tokenizer_pieces(),
+                                 strip_special_tokens(loader_.tokenizer_pieces(), ids[b]));
     } else {
         // CTC stays per-item (no autoregressive decode to batch).
         for (int b = 0; b < mb.B; ++b)
@@ -347,7 +348,7 @@ static Transcription decode_enc_out_with_timestamps(
     std::vector<int32_t> ids;
     ids.reserve(toks.size());
     for (const TokenInfo& ti : toks) ids.push_back(ti.id);
-    result.text   = detokenize(loader.tokenizer_pieces(), ids);
+    result.text   = detokenize(loader.tokenizer_pieces(), strip_special_tokens(loader.tokenizer_pieces(), ids));
     result.words  = group_words(toks, loader.tokenizer_pieces(), frame_sec);
     result.tokens = std::move(toks);
     return result;
@@ -459,7 +460,8 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
         // transducer tail does.
         for (int b = 0; b < mb.B; ++b) {
             Transcription& result = outs[b];
-            result.text   = detokenize(loader_.tokenizer_pieces(), ids[b]);
+            result.text   = detokenize(loader_.tokenizer_pieces(),
+                                       strip_special_tokens(loader_.tokenizer_pieces(), ids[b]));
             result.words  = group_words(toks[b], loader_.tokenizer_pieces(), frame_sec);
             result.tokens = std::move(toks[b]);
         }
