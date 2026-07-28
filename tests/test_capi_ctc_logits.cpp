@@ -13,12 +13,17 @@
 // logits-exposure entry point), in two independent blocks (mirrors
 // test_capi.cpp's two-optional-env-vars shape):
 //
-//   1. Self-consistency on a real standalone-CTC checkpoint: reconstructing
-//      text from the exposed [T, vocab+1] log-prob matrix via the SAME
-//      ctc_greedy + detokenize path decode_enc_out uses internally must
-//      reproduce transcribe_pcm(..., kCTC)'s own greedy transcript
-//      byte-for-byte. Exercises the ctc_head_tensor standalone-model fallback
-//      path (decoder.* prefix, not the hybrid ctc_decoder.*).
+//   1. Self-consistency on a real standalone-CTC checkpoint, through the
+//      actual C-API (parakeet_capi_load / parakeet_capi_transcribe_pcm_logits
+//      / parakeet_capi_free_logits — exercising the C boundary and malloc/free
+//      contract, not just the underlying C++ method): reconstructing text
+//      from the exposed [T, vocab+1] log-prob matrix via the SAME ctc_greedy +
+//      detokenize path decode_enc_out uses internally must reproduce
+//      transcribe_pcm(..., kCTC)'s own greedy transcript byte-for-byte
+//      (transcribe_pcm and the tokenizer/blank_id come from a separate
+//      pk::Model load, used only for that reference text and metadata).
+//      Exercises the ctc_head_tensor standalone-model fallback path
+//      (decoder.* prefix, not the hybrid ctc_decoder.*).
 //
 //   2. Error path at the C-API boundary: a model with NO CTC head at all
 //      (e.g. a pure RNNT/TDT streaming model) must make
@@ -44,6 +49,11 @@ int main() {
     const char* ctc_gguf = std::getenv("PARAKEET_TEST_GGUF_CTC");
     if (ctc_gguf) {
         ran_any = true;
+        // pk::Model is used only for the reference text and tokenizer/blank_id
+        // access below — the logits themselves come from the actual C-API
+        // (parakeet_capi_load/parakeet_capi_transcribe_pcm_logits), so this
+        // block exercises the C boundary and malloc/free contract, not just
+        // the underlying C++ method.
         auto model = pk::Model::load(ctc_gguf);
         if (!model) {
             std::fprintf(stderr, "test_capi_ctc_logits: load failed for %s\n", ctc_gguf);
@@ -58,16 +68,36 @@ int main() {
 
         const std::string reference = model->transcribe_pcm(audio.samples, 16000, pk::Decoder::kCTC);
 
-        std::vector<float> logits;
-        int T = 0, vocab_plus_1 = 0;
-        model->transcribe_pcm_ctc_logits(audio.samples, 16000, logits, T, vocab_plus_1);
-
-        if (T <= 0 || vocab_plus_1 <= 0 || (size_t)T * (size_t)vocab_plus_1 != logits.size()) {
-            std::fprintf(stderr,
-                "test_capi_ctc_logits: bad shape T=%d vocab_plus_1=%d logits.size()=%zu\n",
-                T, vocab_plus_1, logits.size());
+        parakeet_ctx* ctx = parakeet_capi_load(ctc_gguf);
+        if (!ctx) {
+            std::fprintf(stderr, "test_capi_ctc_logits: parakeet_capi_load failed for %s\n", ctc_gguf);
             return 1;
         }
+
+        float* out_logits = nullptr;
+        int T = 0, vocab_plus_1 = 0;
+        int rc = parakeet_capi_transcribe_pcm_logits(
+            ctx, audio.samples.data(), (int)audio.samples.size(), 16000,
+            &out_logits, &T, &vocab_plus_1);
+
+        if (rc != 0) {
+            std::fprintf(stderr, "test_capi_ctc_logits: transcribe_pcm_logits failed: %s\n",
+                         parakeet_capi_last_error(ctx));
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+        if (!out_logits || T <= 0 || vocab_plus_1 <= 0) {
+            std::fprintf(stderr,
+                "test_capi_ctc_logits: bad output out_logits=%p T=%d vocab_plus_1=%d\n",
+                (void*)out_logits, T, vocab_plus_1);
+            parakeet_capi_free_logits(out_logits);
+            parakeet_capi_free(ctx);
+            return 1;
+        }
+
+        std::vector<float> logits(out_logits, out_logits + (size_t)T * (size_t)vocab_plus_1);
+        parakeet_capi_free_logits(out_logits);
+        parakeet_capi_free(ctx);
 
         const int blank_id = (int)model->config().blank_id;
         std::vector<int32_t> ids = pk::ctc_greedy(logits, T, vocab_plus_1, blank_id);
@@ -86,8 +116,8 @@ int main() {
         }
 
         std::fprintf(stderr,
-            "test_capi_ctc_logits: PASS block 1 (argmax-greedy over exposed logits "
-            "reproduces the CLI's own greedy text)\n");
+            "test_capi_ctc_logits: PASS block 1 (argmax-greedy over the C-API's exposed "
+            "logits reproduces the CLI's own greedy text)\n");
     } else {
         std::fprintf(stderr, "test_capi_ctc_logits: PARAKEET_TEST_GGUF_CTC not set; skip block 1\n");
     }

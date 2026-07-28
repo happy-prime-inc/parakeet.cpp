@@ -200,10 +200,13 @@ char* parakeet_capi_transcribe_pcm_nbest_json(
 // already log-softmaxed over the vocab axis — and sets `*out_T` /
 // `*out_vocab_plus_1`. Free `*out_logits` with parakeet_capi_free_logits.
 //
-// On error (no model, invalid samples buffer, the model has no CTC head, or
-// OOM) returns nonzero, sets the context's last error (see
-// parakeet_capi_last_error), and leaves `*out_logits` NULL — the caller owns
-// nothing and has nothing to free.
+// On error returns nonzero. A NULL `ctx` or any NULL out-param pointer
+// returns nonzero without writing through any pointer (nothing to zero
+// safely). Otherwise (ctx and all three out-params valid, but e.g. no model,
+// invalid samples buffer, the model has no CTC head, or OOM) sets the
+// context's last error (see parakeet_capi_last_error) and leaves `*out_logits`
+// NULL and `*out_T`/`*out_vocab_plus_1` 0 — the caller owns nothing and has
+// nothing to free.
 int parakeet_capi_transcribe_pcm_logits(parakeet_ctx* ctx, const float* samples,
                                         int n_samples, int sample_rate,
                                         float** out_logits, int* out_T,

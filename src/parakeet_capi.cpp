@@ -212,9 +212,14 @@ extern "C" int parakeet_capi_transcribe_pcm_logits(parakeet_ctx* ctx,
                                                     const float* samples, int n_samples,
                                                     int sample_rate, float** out_logits,
                                                     int* out_T, int* out_vocab_plus_1) {
-    if (!out_logits || !out_T || !out_vocab_plus_1) return 1;
-    *out_logits = nullptr;
     if (!ctx) return 1;
+    if (!out_logits || !out_T || !out_vocab_plus_1) {
+        ctx->last_error = "invalid output pointer(s)";
+        return 1;
+    }
+    *out_logits = nullptr;
+    *out_T = 0;
+    *out_vocab_plus_1 = 0;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return 1; }
     if (!samples || n_samples < 0) { ctx->last_error = "invalid samples buffer"; return 1; }
     try {
