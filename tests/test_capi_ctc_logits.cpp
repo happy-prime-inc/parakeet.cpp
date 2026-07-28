@@ -67,6 +67,13 @@ int main() {
         }
 
         const std::string reference = model->transcribe_pcm(audio.samples, 16000, pk::Decoder::kCTC);
+        const int blank_id = (int)model->config().blank_id;
+        const std::vector<std::string> tokenizer_pieces = model->loader().tokenizer_pieces();
+        // Release the pk::Model before loading a second full model via the C-API
+        // below — keeping both resident at once nearly doubles peak RAM for a
+        // 1.1B checkpoint. Only blank_id/tokenizer_pieces (cached above) and the
+        // already-computed reference text are needed from here on.
+        model.reset();
 
         parakeet_ctx* ctx = parakeet_capi_load(ctc_gguf);
         if (!ctx) {
@@ -99,11 +106,10 @@ int main() {
         parakeet_capi_free_logits(out_logits);
         parakeet_capi_free(ctx);
 
-        const int blank_id = (int)model->config().blank_id;
         std::vector<int32_t> ids = pk::ctc_greedy(logits, T, vocab_plus_1, blank_id);
         const std::string reconstructed = pk::detokenize(
-            model->loader().tokenizer_pieces(),
-            pk::strip_special_tokens(model->loader().tokenizer_pieces(), ids));
+            tokenizer_pieces,
+            pk::strip_special_tokens(tokenizer_pieces, ids));
 
         std::fprintf(stderr, "test_capi_ctc_logits: reference     = %s\n", reference.c_str());
         std::fprintf(stderr, "test_capi_ctc_logits: reconstructed = %s\n", reconstructed.c_str());

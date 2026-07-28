@@ -221,8 +221,9 @@ void Model::transcribe_16k_ctc_logits(const std::vector<float>& pcm16k,
         encoder.forward(feats, n_mels, Tmel, enc_out, d_model, Tout);
     }
 
-    // 2b. Prompt conditioning (multilingual nemotron). No-op for non-prompt
-    //     models — the case a CTC-only model always is in practice.
+    // 2b. Prompt conditioning (multilingual nemotron): project the encoder
+    //     output with the selected language one-hot before decoding. No-op
+    //     for other models (prompt.present == false).
     maybe_apply_prompt(loader_, enc_out, d_model, Tout, prompt_index);
 
     // 3. CTC head only — always, regardless of the model's preferred decoder.
