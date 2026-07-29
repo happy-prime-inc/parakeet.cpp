@@ -91,6 +91,12 @@ jobs:
             # gens, real code for 86/89/120a, plus 121a for GB10 on CUDA 13).
             cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
             cuda_archs: ""
+          - backend: cuda12
+            arch: x64
+            runner: ubuntu-24.04
+            # cuda12.x is the last cuda that supports older GPU families, like Volta.
+            cmake_args: "-DPARAKEET_GGML_CUDA=ON -DGGML_CUDA_NO_VMM=ON"
+            cuda_archs: ""
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -137,12 +143,21 @@ jobs:
           sudo apt-get install -y cuda-toolkit-13-0
           echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
 
+      - name: Install CUDA toolkit 12
+        if: matrix.backend == 'cuda12'
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y cuda-toolkit-12-9
+          echo "/usr/local/cuda/bin" >> "$GITHUB_PATH"
+
       - name: Configure
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
           EXTRA=""
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             # $ORIGIN rpath so the bundled cudart/cublas next to the binary
             # are found without LD_LIBRARY_PATH.
             EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
@@ -183,7 +198,7 @@ jobs:
           mkdir "$BUNDLE"
           cp build/examples/cli/parakeet-cli build/examples/server/parakeet-server \
              LICENSE README.md "$BUNDLE"/
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
@@ -238,7 +253,7 @@ jobs:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
           EXTRA=""
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             EXTRA="-DCMAKE_BUILD_RPATH=\$ORIGIN"
           fi
           cmake -B build-shared \
@@ -263,7 +278,7 @@ jobs:
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
           mkdir "$BUNDLE"
           cp build-shared/libparakeet.so include/parakeet_capi.h LICENSE README.md "$BUNDLE"/
-          if [ "${{ matrix.backend }}" = "cuda" ]; then
+          if [ "${{ matrix.backend }}" = "cuda" ] || [ "${{ matrix.backend }}" = "cuda12" ]; then
             cp -P /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublas.so* \
                   /usr/local/cuda/targets/x86_64-linux/lib/libcublasLt.so* \
