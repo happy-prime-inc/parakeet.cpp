@@ -77,6 +77,28 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 int blank_id, int max_symbols,
                                 std::vector<TokenInfo>* tokens = nullptr);
 
+// Loop-carried state for incrementally decoding TDT encoder frames. In addition
+// to the prediction-network hypothesis, TDT must retain a duration that crosses
+// a chunk boundary: those leading frames in the next chunk have already been
+// consumed by the prior token and must not be decoded again.
+struct TdtDecodeState {
+    PredState state;
+    int32_t last_token = -1;
+    bool have_token = false;
+    int pending_skip = 0;
+    int64_t frames_seen = 0;
+    std::vector<int32_t> hyp;
+};
+
+TdtDecodeState tdt_decode_init(const PredictionNet& pred);
+
+std::vector<int32_t> tdt_decode_frames(
+    const PredictionNet& pred, const Joint& joint,
+    const std::vector<float>& enc_frames, int Tnew, int enc_hidden,
+    const std::vector<int32_t>& durations, TdtDecodeState& st,
+    int blank_id, int max_symbols,
+    std::vector<TokenInfo>* tokens = nullptr);
+
 // Sequence-level beam search for TDT models, matching NeMo BeamTDTInfer's
 // `default_beam_search`:
 //
