@@ -89,6 +89,15 @@ int main(int argc, char** argv) {
     const int right_context = 200;
     const int valid_mel = Tmel - 1; // final frontend frame is center-pad.
 
+    // NeMo's buffered script runs the preprocessor on each [left|chunk|right]
+    // AUDIO buffer, so per_feature normalization uses that window's statistics
+    // rather than the whole utterance's. Slicing a globally-normalized mel is a
+    // different computation, and on a 7.4s fixture the two happen to agree
+    // because every window starts at sample 0. PARAKEET_WINDOW_NORM=1 selects
+    // NeMo's scheme so both can be measured on one build.
+    const bool window_norm = std::getenv("PARAKEET_WINDOW_NORM") != nullptr;
+    const int hop = (int)ml.config().hop_length;
+
     pk::Encoder encoder(ml);
     pk::PredictionNet pred(ml);
     pk::Joint joint(ml);
@@ -104,15 +113,31 @@ int main(int argc, char** argv) {
         const int lo = std::max(0, pos - left_context);
         const int hi = std::min(valid_mel, commit_hi + right_context);
         const int window_valid = hi - lo;
-        // Preserve the preprocessor's one trailing pad frame contract.
-        const int window_T = window_valid + 1;
-        std::vector<float> window((size_t)n_mels * window_T);
-        for (int m = 0; m < n_mels; ++m) {
-            for (int t = 0; t < window_valid; ++t)
-                window[(size_t)m * window_T + t] =
-                    mel[(size_t)m * Tmel + lo + t];
-            window[(size_t)m * window_T + window_valid] =
-                mel[(size_t)m * Tmel + std::min(Tmel - 1, hi)];
+        std::vector<float> window;
+        int window_T = 0;
+        if (window_norm) {
+            // Run the frontend on this window's audio, exactly as NeMo does.
+            // compute() supplies its own centre padding, so the trailing
+            // pad-frame contract falls out rather than being reconstructed.
+            const size_t lo_sample = (size_t)lo * hop;
+            const size_t hi_sample = std::min(audio.samples.size(), (size_t)hi * hop);
+            std::vector<float> window_audio(audio.samples.begin() + lo_sample,
+                                            audio.samples.begin() + hi_sample);
+            int wn_mels = 0;
+            frontend.compute(window_audio, window, wn_mels, window_T);
+            if (wn_mels != n_mels) return 1;
+        } else {
+            // Slice the globally normalized mel, preserving the preprocessor's
+            // one trailing pad frame contract.
+            window_T = window_valid + 1;
+            window.assign((size_t)n_mels * window_T, 0.0f);
+            for (int m = 0; m < n_mels; ++m) {
+                for (int t = 0; t < window_valid; ++t)
+                    window[(size_t)m * window_T + t] =
+                        mel[(size_t)m * Tmel + lo + t];
+                window[(size_t)m * window_T + window_valid] =
+                    mel[(size_t)m * Tmel + std::min(Tmel - 1, hi)];
+            }
         }
 
         std::vector<float> enc_cf;
