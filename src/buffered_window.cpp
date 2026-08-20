@@ -31,8 +31,8 @@ BufferedTdtStream::BufferedTdtStream(const ModelLoader& ml,
     // script does the same correction ("Corrected contexts (subsampled
     // encoder frames)" in its log) for the same reason.
     const double sr = (double)(cfg.sample_rate ? cfg.sample_rate : 16000);
-    const int sub = (int)(cfg.subsampling_factor ? cfg.subsampling_factor : 8);
-    const int64_t enc_frame_samples = (int64_t)hop_ * sub;
+    sub_factor_ = (int)(cfg.subsampling_factor ? cfg.subsampling_factor : 8);
+    const int64_t enc_frame_samples = (int64_t)hop_ * sub_factor_;
     // Truncation, not round-half-up, because that is NeMo's convention
     // (int(secs * features_per_sec / subsampling_factor)) and parity means
     // matching its corrected schedule exactly: 1 s -> 12 encoder frames
@@ -122,13 +122,20 @@ void BufferedTdtStream::drain_ready(bool flush, std::vector<int32_t>& out) {
         enc_.forward(mel, n_mels, window_T, enc_cf, d_model, Tw);
         if (Tw <= 0 || d_model <= 0) return;
 
-        // Encoder frames for this chunk. valid_out_len is the encoder's own
-        // length recurrence (and handles causal downsampling), rather than a
-        // local ceil(n/8) that silently assumes the non-causal case.
-        const int mel_off    = (int)((next_chunk_ - lo) / hop_);
-        const int mel_commit = (int)((commit_hi  - lo) / hop_);
-        const int first = std::min(Tw, sub_.valid_out_len(window_T, mel_off));
-        const int last  = std::min(Tw, sub_.valid_out_len(window_T, mel_commit));
+        // Encoder frames for this chunk. Every span is a whole number of
+        // encoder frames (see the schedule rounding in the constructor), so
+        // this is exact division rather than a length recurrence — and it is
+        // what NeMo does: it slices encoder_output[:, encoder_context.left:]
+        // with left already expressed in subsampled frames.
+        //
+        // valid_out_len is the wrong tool here despite being the encoder's own
+        // authority on lengths: valid_out_len(T, 0) returns 1, not 0, because
+        // its per-stage recurrence adds one after the division. Using it for
+        // the chunk offset therefore skipped encoder frame 0 of the very first
+        // chunk on every stream.
+        const int64_t enc_frame = (int64_t)hop_ * sub_factor_;
+        const int first = std::min<int>(Tw, (int)((next_chunk_ - lo) / enc_frame));
+        const int last  = std::min<int>(Tw, (int)((commit_hi  - lo) / enc_frame));
         if (last <= first) { next_chunk_ = commit_hi; continue; }
 
         // Channels-first [d_model, Tw] -> time-major [n, d_model].

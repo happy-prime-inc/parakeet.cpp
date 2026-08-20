@@ -99,6 +99,7 @@ private:
     TranscriptAccumulator acc_;
 
     int hop_ = 160;
+    int sub_factor_ = 8;           // encoder subsampling (mel frames per enc frame)
     int blank_id_ = 0;
     int max_symbols_ = 10;
     std::vector<int32_t> durations_;
