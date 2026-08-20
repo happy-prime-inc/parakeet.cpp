@@ -20,12 +20,28 @@ BufferedTdtStream::BufferedTdtStream(const ModelLoader& ml,
     durations_   = cfg.tdt_durations;
 
     // Derive the schedule from the model's own framing rather than assuming
-    // 100 mel frames/s, and round each span to a whole mel frame so every chunk
-    // boundary lands on a frame boundary.
+    // 100 mel frames/s, and round each span to a whole ENCODER frame — not a
+    // whole mel frame. The encoder subsamples the mel by subsampling_factor,
+    // so a chunk that is not a multiple of it (1 s = 100 mel = 12.5 encoder
+    // frames at x8) puts every chunk boundary between encoder frames; the
+    // trim then rounds each window into overlapping or skipping its
+    // neighbours while the carried decoder state assumes seamless
+    // continuation. Measured on a 200 s reading before this rounding: a
+    // 10/1/1 schedule deleted 162 of 369 reference words. NeMo's buffered
+    // script does the same correction ("Corrected contexts (subsampled
+    // encoder frames)" in its log) for the same reason.
     const double sr = (double)(cfg.sample_rate ? cfg.sample_rate : 16000);
+    const int sub = (int)(cfg.subsampling_factor ? cfg.subsampling_factor : 8);
+    const int64_t enc_frame_samples = (int64_t)hop_ * sub;
+    // Truncation, not round-half-up, because that is NeMo's convention
+    // (int(secs * features_per_sec / subsampling_factor)) and parity means
+    // matching its corrected schedule exactly: 1 s -> 12 encoder frames
+    // (0.96 s), not 13. At least one frame per span so a small chunk cannot
+    // round to zero and stall the drain loop.
     auto to_samples = [&](double secs) -> int64_t {
-        const int64_t frames = (int64_t)(secs * sr / (double)hop_ + 0.5);
-        return frames * (int64_t)hop_;
+        int64_t frames = (int64_t)(secs * sr / (double)enc_frame_samples);
+        if (secs > 0 && frames < 1) frames = 1;
+        return frames * enc_frame_samples;
     };
     left_s_  = to_samples(left_secs);
     chunk_s_ = to_samples(chunk_secs);

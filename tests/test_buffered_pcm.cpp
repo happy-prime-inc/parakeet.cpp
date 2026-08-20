@@ -14,12 +14,17 @@
 //   PARAKEET_TEST_GGUF_06B      offline TDT checkpoint
 //   PARAKEET_TEST_AUDIO         16 kHz mono WAV
 //   PARAKEET_TEST_NEMO_BASELINE optional NeMo token reference (text or GGUF)
+//   PARAKEET_STREAM_SCHEDULE    optional "left,chunk,right" seconds (default
+//                               10,2,2) — the latency/accuracy sweep knob.
+//                               The final transcript goes to stdout so the
+//                               sweep can score it against a reference.
 #include "audio_io.hpp"
 #include "buffered_window.hpp"
 #include "model_loader.hpp"
 #include "ggml.h"
 #include "gguf.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -54,9 +59,23 @@ static bool read_reference_tokens(const char* path, std::vector<int32_t>& out) {
     return !out.empty();
 }
 
+static void schedule(double& left, double& chunk, double& right) {
+    left = 10.0; chunk = 2.0; right = 2.0;
+    if (const char* e = std::getenv("PARAKEET_STREAM_SCHEDULE")) {
+        double l = 0, c = 0, r = 0;
+        if (std::sscanf(e, "%lf,%lf,%lf", &l, &c, &r) == 3 && c > 0 && r >= 0 && l >= 0) {
+            left = l; chunk = c; right = r;
+        } else {
+            std::fprintf(stderr, "ignoring malformed PARAKEET_STREAM_SCHEDULE=%s\n", e);
+        }
+    }
+}
+
 static std::vector<int32_t> run(const pk::ModelLoader& ml, const std::vector<float>& pcm,
-                                int block) {
-    pk::BufferedTdtStream stream(ml);
+                                int block, std::string* text_out = nullptr) {
+    double left, chunk, right;
+    schedule(left, chunk, right);
+    pk::BufferedTdtStream stream(ml, left, chunk, right);
     if (block <= 0) {
         stream.feed_pcm(pcm.data(), (int)pcm.size(), /*is_last=*/true);
     } else {
@@ -69,6 +88,7 @@ static std::vector<int32_t> run(const pk::ModelLoader& ml, const std::vector<flo
         }
     }
     stream.finalize();
+    if (text_out) *text_out = stream.text();
     return stream.tokens();
 }
 
@@ -87,14 +107,28 @@ int main() {
     if (!pk::load_audio_16k_mono(wav, audio)) return 1;
 
     // One-shot is the oracle: the same schedule, no PCM boundaries to get wrong.
-    const std::vector<int32_t> oracle = run(ml, audio.samples, /*block=*/0);
-    std::fprintf(stderr, "one-shot tokens=%zu\n", oracle.size());
+    double left, chunk, right;
+    schedule(left, chunk, right);
+    std::string text;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<int32_t> oracle = run(ml, audio.samples, /*block=*/0, &text);
+    const double infer_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    std::printf("%s\n", text.c_str());
+    std::fprintf(stderr,
+        "schedule=%g,%g,%g one-shot tokens=%zu inference_ms=%.0f audio_s=%.1f\n",
+        left, chunk, right, oracle.size(), infer_ms,
+        audio.samples.size() / 16000.0);
     if (oracle.empty()) { std::fprintf(stderr, "one-shot produced nothing\n"); return 1; }
 
     // 1600 = 100 ms, the app's capture block. 1237 and 999 are deliberately not
     // multiples of the 160-sample hop, so frames straddle feed boundaries.
+    // PARAKEET_TEST_ONESHOT_ONLY skips this loop: a latency/accuracy sweep
+    // over a 200s file needs the transcript once, not seven decodes of it.
     int failures = 0;
-    for (int block : {1600, 1237, 999, 32000, 7}) {
+    const bool oneshot_only = std::getenv("PARAKEET_TEST_ONESHOT_ONLY") != nullptr;
+    for (int block : oneshot_only ? std::initializer_list<int>{}
+                                  : std::initializer_list<int>{1600, 1237, 999, 32000, 7}) {
         const std::vector<int32_t> got = run(ml, audio.samples, block);
         const bool same = (got == oracle);
         std::fprintf(stderr, "block=%-6d tokens=%-5zu %s\n",
