@@ -69,6 +69,57 @@ public:
     // Flush the tail without new audio and return the newly finalized text.
     std::string finalize();
 
+    // A preview of the right-context region: what the decoder would say about
+    // the audio it has encoded but not yet committed.
+    //
+    // Every chunk already encodes [left | chunk | right] and then decodes only
+    // the chunk. The right region's encoder frames therefore exist and are
+    // simply discarded. Decoding them from a COPY of the decoder state yields
+    // the newest words about a second after they are spoken, instead of the
+    // chunk + right context (~3-4 s) a committed word waits for. The copy is
+    // thrown away, so the committed transcript is byte-for-byte what it would
+    // be without this and remains append-only.
+    //
+    // These words ARE revisable — that is the point, and why they belong in a
+    // display's tentative tier rather than its settled one. They are usually
+    // what the model goes on to commit, because they come from the same model
+    // and the same carried state, differing only in how much right context the
+    // encoder had for those frames.
+    //
+    // Replaced wholesale on every feed; empty when speculation is off or no
+    // uncommitted frames exist.
+    const std::string& tentative_text() const { return tentative_; }
+
+    // Preview the opening of a turn before any chunk can commit.
+    //
+    // Nothing can be committed until a whole chunk AND its right context have
+    // arrived, so the first words of a turn would otherwise wait ~chunk+right
+    // (about 3 s after speech starts, once the VAD prebuffer's head start is
+    // counted) while later words wait ~1 s. That asymmetry is what a reader
+    // notices at the start of every sentence.
+    //
+    // This previews whatever audio exists before the first commit, from a copy
+    // of the decoder state. Unlike the tail preview it needs its own encoder
+    // pass — but only here, where it is cheap: before the first commit there
+    // is no left context yet, so the window is at most chunk+right. Once the
+    // turn is flowing the tail preview takes over and this stops firing.
+    //
+    // Set to 0 to disable.
+    void set_onset_preview_secs(double secs) { onset_min_secs_ = secs; }
+
+    // Speculation costs one decoder pass over frames the encoder has already
+    // produced (no extra encode), so it is on by default. Turn it off to save
+    // that pass, or to assert that committed output does not depend on it.
+    void set_speculate(bool on) { speculate_ = on; if (!on) tentative_.clear(); }
+
+    // How far into the right-context region to preview, in seconds. Frames
+    // near the committed edge still have context after them inside the window
+    // and predict well; frames at the very edge have none and predict badly,
+    // which is the same lack of lookahead that makes a short right context
+    // lossy. Previewing less is more accurate but shows the newest words
+    // later. 0 or negative previews the whole region.
+    void set_preview_secs(double secs) { preview_secs_ = secs; }
+
     const std::vector<int32_t>& tokens() const { return state_.hyp; }
     const std::string& text() const { return acc_.text(); }
     std::string take_new_text() { return acc_.take_new_text(); }
@@ -88,6 +139,16 @@ private:
     // Decode every chunk whose right context is available. `flush` also decodes
     // the trailing partial chunk. Appends emitted ids to `out`.
     void drain_ready(bool flush, std::vector<int32_t>& out);
+
+    // Encode [lo, hi) and decode all of it from a COPY of the decoder state,
+    // leaving the result in tentative_. Used for the turn-opening preview,
+    // which has no already-encoded frames to reuse.
+    void preview_span(int64_t lo, int64_t hi);
+
+    // Decode `n` frames starting at `from` of an already-encoded window from a
+    // COPY of the decoder state, leaving the result in tentative_.
+    void preview_frames(const std::vector<float>& enc_cf, int Tw, int d_model,
+                        int from, int n);
 
     const ModelLoader& ml_;
     MelFrontend   frontend_;
@@ -111,6 +172,11 @@ private:
     int64_t total_seen_ = 0;        // absolute samples fed so far
     int64_t next_chunk_ = 0;        // absolute sample index of the next chunk
     bool    finished_ = false;
+    bool    speculate_ = true;
+    double  preview_secs_ = 0.0;   // <=0 = the whole right-context region
+    double  onset_min_secs_ = 0.4; // audio needed before the first preview
+    int64_t onset_last_ = 0;       // samples at the last onset preview
+    std::string tentative_;        // preview of the not-yet-committed tail
 };
 
 } // namespace pk

@@ -1,4 +1,5 @@
 #include "buffered_window.hpp"
+#include "tokenizer.hpp"
 #include <algorithm>
 
 namespace pk {
@@ -58,6 +59,7 @@ void BufferedTdtStream::reset() {
     total_seen_   = 0;
     next_chunk_   = 0;
     finished_     = false;
+    tentative_.clear();
 }
 
 double BufferedTdtStream::latency_sec() const {
@@ -73,6 +75,27 @@ std::vector<int32_t> BufferedTdtStream::feed_pcm(const float* pcm, int n_samples
         total_seen_ += n_samples;
     }
     drain_ready(is_last, emitted);
+    // Before this turn's first commit, preview the opening directly. Nothing
+    // can commit until a whole chunk AND its right context have arrived, so
+    // without this the first words of a sentence wait ~chunk+right while every
+    // later word waits ~1s — the asymmetry a reader notices at the start of
+    // every sentence, and the difference between "it is working" and "is it
+    // hearing me?".
+    //
+    // This is the one preview that needs its own encoder pass, and it is
+    // affordable precisely because it only runs here: before the first commit
+    // there is no left context yet, so the window is at most chunk+right.
+    // Re-run at most every onset_min_secs_ of new audio, so a 100ms feed
+    // cadence does not mean an encode per feed.
+    if (speculate_ && !is_last && next_chunk_ == 0 && onset_min_secs_ > 0) {
+        const double sr = (double)(ml_.config().sample_rate
+                                   ? ml_.config().sample_rate : 16000);
+        const int64_t step = (int64_t)(onset_min_secs_ * sr);
+        if (total_seen_ >= step && total_seen_ - onset_last_ >= step) {
+            onset_last_ = total_seen_;
+            preview_span(0, total_seen_);
+        }
+    }
     if (is_last) finished_ = true;
     return emitted;
 }
@@ -157,6 +180,24 @@ void BufferedTdtStream::drain_ready(bool flush, std::vector<int32_t>& out) {
         acc_.regroup_words(/*flush_all=*/false);
         out.insert(out.end(), step.begin(), step.end());
 
+        // Preview the right-context region from a COPY of the decoder state.
+        // Those encoder frames are already computed; only the decode is extra,
+        // and the copy means nothing here can touch the committed transcript.
+        // Bounded to the frames backed by real audio, so end-of-stream padding
+        // is never previewed.
+        if (speculate_) {
+            int tail_avail = (int)((hi - commit_hi) / enc_frame);
+            if (preview_secs_ > 0) {
+                const double sr = (double)(ml_.config().sample_rate
+                                           ? ml_.config().sample_rate : 16000);
+                const int cap = (int)(preview_secs_ * sr / (double)enc_frame);
+                tail_avail = std::min(tail_avail, std::max(cap, 1));
+            }
+            const int tail_n = std::min(Tw - last, tail_avail);
+            if (tail_n > 0) preview_frames(enc_cf, Tw, d_model, last, tail_n);
+            else            tentative_.clear();
+        }
+
         next_chunk_ = commit_hi;
 
         // Drop audio older than the next window's left context. This is what
@@ -173,6 +214,49 @@ void BufferedTdtStream::drain_ready(bool flush, std::vector<int32_t>& out) {
         // is the loop head — have_tail goes false once next_chunk_ reaches
         // total_seen_.
     }
+}
+
+
+void BufferedTdtStream::preview_frames(const std::vector<float>& enc_cf, int Tw,
+                                       int d_model, int from, int n) {
+    if (n <= 0) { tentative_.clear(); return; }
+    std::vector<float> frames((size_t)n * d_model);
+    for (int t = 0; t < n; ++t)
+        for (int c = 0; c < d_model; ++c)
+            frames[(size_t)t * d_model + c] = enc_cf[(size_t)c * Tw + (from + t)];
+    // A COPY of the decoder state: the full carried linguistic history, so the
+    // preview reads as a continuation rather than a cold start — and discarded
+    // on return, so nothing here can reach the committed transcript.
+    TdtDecodeState spec = state_;
+    const std::vector<int32_t> ids =
+        tdt_decode_frames(pred_, joint_, frames, n, d_model, durations_, spec,
+                          blank_id_, max_symbols_);
+    tentative_ = detokenize(ml_.config().tokenizer_pieces,
+                            strip_special_tokens(ml_.config().tokenizer_pieces, ids));
+}
+
+void BufferedTdtStream::preview_span(int64_t lo, int64_t hi) {
+    if (hi <= lo) return;
+    const size_t off_lo = (size_t)(lo - audio_origin_);
+    const size_t off_hi = (size_t)(hi - audio_origin_);
+    if (off_hi > audio_.size() || off_lo > off_hi) return;
+
+    std::vector<float> window_audio(audio_.begin() + off_lo, audio_.begin() + off_hi);
+    std::vector<float> mel;
+    int n_mels = 0, window_T = 0;
+    frontend_.compute(window_audio, mel, n_mels, window_T);
+    if (window_T <= 0) return;
+
+    std::vector<float> enc_cf;
+    int d_model = 0, Tw = 0;
+    enc_.forward(mel, n_mels, window_T, enc_cf, d_model, Tw);
+    if (Tw <= 0 || d_model <= 0) return;
+
+    // Only the frames backed by real audio; the frontend's trailing pad frame
+    // would otherwise be previewed as if it were speech.
+    const int64_t enc_frame = (int64_t)hop_ * sub_factor_;
+    const int valid = std::min(Tw, (int)((hi - lo) / enc_frame));
+    preview_frames(enc_cf, Tw, d_model, 0, valid);
 }
 
 } // namespace pk
