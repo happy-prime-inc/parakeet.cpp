@@ -58,7 +58,12 @@ typedef struct parakeet_ctx parakeet_ctx;
 //     scales accordingly). TDT vocabularies have no <EOU>/<EOB>, so *eou_out
 //     stays 0 and the events surface stays empty for them. Added
 //     parakeet_capi_stream_reset (both stream kinds): reuse a stream for a
-//     new utterance without free+begin. The original entry points are
+//     new utterance without free+begin. The streaming JSON documents gain a
+//     "tentative" string: a preview of audio the encoder has processed but
+//     the decoder has not committed (buffered TDT only, empty otherwise).
+//     It is REPLACED on every call and may change before settling, so it
+//     belongs in a caller's tentative/dimmed tier; "text" and "words" remain
+//     append-only and are unaffected by it. The original entry points are
 //     unchanged for cache-aware models.
 int parakeet_capi_abi_version(void);
 

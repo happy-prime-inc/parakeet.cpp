@@ -727,7 +727,8 @@ namespace {
 std::string stream_json(const std::string& text, int eou, int eob,
                         float frame_sec,
                         const std::vector<pk::EouEvent>& events,
-                        const std::vector<pk::Word>& words) {
+                        const std::vector<pk::Word>& words,
+                        const std::string& tentative = std::string()) {
     std::string out;
     out.reserve(80 + events.size() * 36 + words.size() * 48);
     out += "{\"text\":";
@@ -762,7 +763,15 @@ std::string stream_json(const std::string& text, int eou, int eob,
         pk::append_json_float(out, "%.4f", words[i].conf);
         out += '}';
     }
-    out += "]}";
+    out += "]";
+    // "tentative": a preview of audio that is encoded but not yet committed
+    // (buffered TDT only; always empty for cache-aware streams). Unlike
+    // "text"/"words", it is REPLACED on every call and may change before it
+    // settles — it belongs in a display's tentative tier. Committed output is
+    // unaffected by its presence.
+    out += ",\"tentative\":";
+    pk::append_json_string(out, tentative);
+    out += "}";
     return out;
 }
 
@@ -788,7 +797,8 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
             std::string delta = s->buffered->take_new_text();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
             std::vector<pk::Word> words = s->buffered->drain_words();
-            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), events, words);
+            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), events, words,
+                                           s->buffered->tentative_text());
             s->ctx->last_error.clear();
             char* out = dup_to_c(json);
             if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
@@ -825,6 +835,7 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
             std::string delta = s->buffered->finalize();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
             std::vector<pk::Word> words = s->buffered->drain_words();
+            // Nothing is pending after a flush, so the tail is empty here.
             std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), events, words);
             s->finalized = true;
             s->ctx->last_error.clear();
