@@ -7,7 +7,7 @@
 namespace pk {
 
 StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& target_lang)
-    : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml) {
+    : ml_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml), acc_(ml) {
     const ParakeetConfig& cfg = ml.config();
     d_model_  = (int)cfg.d_model;
     blank_id_ = (int)cfg.blank_id;
@@ -29,22 +29,8 @@ StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& tar
     max_symbols_ = (int)cfg.max_symbols;
     assert(joint_.num_durations() == 0 && "StreamingSession is RNN-T only (no TDT durations)");
 
-    // Resolve the <EOU>/<EOB> special token ids from the tokenizer pieces (do
-    // NOT hardcode 1024/1025; read them from the loaded vocab).
-    const auto& pieces = cfg.tokenizer_pieces;
-    for (int i = 0; i < (int)pieces.size(); ++i) {
-        if (pieces[i] == "<EOU>") eou_id_ = i;
-        else if (pieces[i] == "<EOB>") eob_id_ = i;
-    }
-
-    // Per-encoder-frame stride in seconds: each encoder output frame spans
-    // hop_length * subsampling_factor input samples (the subsampling downsamples
-    // the mel-frame time axis by subsampling_factor). time = frame * stride.
-    const double hop = (double)cfg.hop_length;
-    const double sub = (double)(cfg.subsampling_factor ? cfg.subsampling_factor : 1);
-    const double sr  = (double)(cfg.sample_rate ? cfg.sample_rate : 16000);
-    frame_sec_   = (hop * sub) / sr;
-    frame_sec_f_ = (float)frame_sec_;
+    // <EOU>/<EOB> ids and the per-encoder-frame stride are resolved by
+    // TranscriptAccumulator from the same model, for both streaming paths.
 
     reset();
 }
@@ -52,43 +38,7 @@ StreamingSession::StreamingSession(const ModelLoader& ml, const std::string& tar
 void StreamingSession::reset() {
     enc_.reset();
     state_ = rnnt_decode_init(pred_);
-    // eou_id_/eob_id_/frame_sec_ are resolved once in the constructor.
-    enc_frame_ = 0;
-    non_special_.clear();
-    text_.clear();
-    text_taken_ = 0;
-    last_chunk_had_eou_ = false;
-    events_.clear();
-    word_tokens_.clear();
-    words_.clear();
-    words_finalized_ = 0;
-    words_taken_ = 0;
-}
-
-void StreamingSession::process_emitted(const std::vector<int32_t>& emitted) {
-    last_chunk_had_eou_ = false;
-    bool text_changed = false;
-    for (int32_t tok : emitted) {
-        if (tok == eou_id_ || tok == eob_id_) {
-            // EOU/EOB: surface as an event, do NOT add to the text.
-            EouEvent ev;
-            ev.token = tok;
-            ev.is_eob = (tok == eob_id_);
-            // The frame index is recorded into events_ by feed/finalize (which
-            // knows the per-token frame); we patch it there. Here we only know
-            // the token, so push a placeholder the caller will overwrite.
-            ev.encoder_frame = enc_frame_;  // refined by caller via per-token frame
-            ev.time_sec = ev.encoder_frame * frame_sec_;
-            events_.push_back(ev);
-            last_chunk_had_eou_ = true;
-        } else {
-            non_special_.push_back(tok);
-            text_changed = true;
-        }
-    }
-    if (text_changed) {
-        text_ = detokenize(ml_.config().tokenizer_pieces, non_special_);
-    }
+    acc_.reset();
 }
 
 std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& mel_chunk,
@@ -99,7 +49,7 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     std::vector<float> enc_frames = enc_.step(mel_chunk, n_frames, is_last, n_valid);
 
     if (n_valid <= 0) {
-        last_chunk_had_eou_ = false;
+        acc_.absorb({}, {}, nullptr, acc_.encoder_frame());  // clears the EOU flag
         return {};
     }
 
@@ -127,37 +77,20 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     //    across chunks (do NOT reset). Appends to state_.hyp and returns the ids
     //    emitted in this chunk, with their LOCAL frame index in [0, n_valid) and
     //    per-token TokenInfo (LOCAL frame, max_prob conf, span==1).
-    const int base_frame = enc_frame_;
+    const int base_frame = acc_.encoder_frame();
     std::vector<int32_t> local_frames;
     std::vector<TokenInfo> chunk_tokens;
     std::vector<int32_t> emitted =
         rnnt_decode_frames(pred_, joint_, enc_frames, n_valid, d_model_,
                            state_, blank_id_, max_symbols_, &local_frames,
                            &chunk_tokens);
-    enc_frame_ += n_valid;
+    acc_.advance_frames(n_valid);
 
-    // 3. Update text + EOU events; refine each new event's absolute frame index
-    //    from the per-token local frame the decoder reported.
-    const size_t prev_events = events_.size();
-    process_emitted(emitted);
-    // Re-walk emitted to assign the correct absolute frame to each new event,
-    // and accumulate NON-special tokens (absolute frame) for word grouping.
-    size_t evi = prev_events;
-    for (size_t i = 0; i < emitted.size(); ++i) {
-        if (emitted[i] == eou_id_ || emitted[i] == eob_id_) {
-            const int abs_frame = base_frame + (int)local_frames[i];
-            events_[evi].encoder_frame = abs_frame;
-            events_[evi].time_sec = abs_frame * frame_sec_;
-            ++evi;
-        } else {
-            TokenInfo ti = chunk_tokens[i];
-            ti.frame += base_frame;  // local -> absolute encoder frame
-            word_tokens_.push_back(ti);
-        }
-    }
-    // Regroup the accumulated tokens; words before the last (still-open) one are
-    // final and become available to drain_words().
-    regroup_words(/*flush_all=*/false);
+    // 3. Update text, EOU events (absolute frames from the decoder's per-token
+    //    local frame + base) and per-word timestamps. rnnt_decode_frames reports
+    //    LOCAL frames, so local_frames is passed and base_frame added.
+    acc_.absorb(emitted, chunk_tokens, &local_frames, base_frame);
+    acc_.regroup_words(/*flush_all=*/false);
 
     // 4. End-of-utterance reset. The realtime EOU model is trained to emit <EOU>
     //    (end of utterance) / <EOB> (backchannel) and have the decoder START THE
@@ -175,7 +108,7 @@ std::vector<int32_t> StreamingSession::feed_mel_chunk(const std::vector<float>& 
     //    byte on multi-utterance clips), so the validated streaming-encoder path is
     //    left untouched. enc_frame_ keeps running so <EOU> timestamps stay absolute
     //    in the clip, and state_.hyp keeps the full token record across utterances.
-    if (last_chunk_had_eou_) {
+    if (acc_.last_step_had_eou()) {
         state_.state      = pred_.zero_state();
         state_.last_token = -1;     // SOS sentinel (nothing emitted yet)
         state_.have_token = false;
@@ -196,47 +129,19 @@ std::string StreamingSession::finalize() {
     // Word side: the end-of-stream has no further word-start markers, so the
     // trailing open word is now final too — regroup with flush_all so it becomes
     // available to drain_words().
-    regroup_words(/*flush_all=*/true);
-    return take_new_text();
+    acc_.regroup_words(/*flush_all=*/true);
+    return acc_.take_new_text();
 }
 
-void StreamingSession::regroup_words(bool flush_all) {
-    // Re-run the validated offline grouping over the whole accumulated
-    // non-special token sequence (it does the punctuation lookahead / refinement
-    // exactly like the offline transcribe_with_timestamps path). The last word is
-    // still "open" (its text/end can change when more tokens arrive), so only
-    // words BEFORE it are considered final mid-stream; flush_all makes every word
-    // final at end-of-stream.
-    words_ = group_words(word_tokens_, ml_.config().tokenizer_pieces, frame_sec_f_);
-    if (words_.empty()) {
-        words_finalized_ = 0;
-    } else {
-        words_finalized_ = flush_all ? words_.size() : (words_.size() - 1);
-    }
-    // Never "un-finalize" a word we've already handed out.
-    if (words_finalized_ < words_taken_) words_finalized_ = words_taken_;
-}
 
-std::vector<Word> StreamingSession::drain_words() {
-    std::vector<Word> out;
-    for (size_t i = words_taken_; i < words_finalized_ && i < words_.size(); ++i)
-        out.push_back(words_[i]);
-    words_taken_ = words_finalized_;
-    return out;
-}
 
-std::string StreamingSession::take_new_text() {
-    if (text_taken_ >= text_.size()) return std::string();
-    std::string delta = text_.substr(text_taken_);
-    text_taken_ = text_.size();
-    return delta;
-}
 
-std::vector<EouEvent> StreamingSession::drain_events() {
-    std::vector<EouEvent> out;
-    out.swap(events_);
-    return out;
-}
+
+std::vector<Word> StreamingSession::drain_words() { return acc_.drain_words(); }
+
+std::string StreamingSession::take_new_text() { return acc_.take_new_text(); }
+
+std::vector<EouEvent> StreamingSession::drain_events() { return acc_.drain_events(); }
 
 void run_stream_over_pcm(
     StreamingSession& sess, const ModelLoader& ml,
