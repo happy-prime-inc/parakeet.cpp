@@ -1,4 +1,5 @@
 #include "parakeet_capi.h"
+#include "buffered_window.hpp"
 #include "parakeet.h"     // pk::Decoder
 #include "model.hpp"      // pk::Model
 #include "streaming.hpp"  // pk::StreamingSession
@@ -35,7 +36,7 @@
 // v6: transcribe_pcm_logits, exposing the CTC head's log-prob matrix (row-major
 //     [T, vocab+1], already log-softmaxed) instead of decoded text, freed with
 //     the new free_logits. Original entry points unchanged.
-#define PARAKEET_CAPI_ABI_VERSION 6
+#define PARAKEET_CAPI_ABI_VERSION 7
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -70,6 +71,12 @@ struct parakeet_stream {
     int n_mels = 0;
     int mel_T = 0;                           // total mel frames accumulated so far
     std::unique_ptr<pk::StreamingSession> sess;
+    // Buffered streaming for OFFLINE TDT checkpoints. Exactly one of sess /
+    // buffered is set, chosen at begin by what the loaded model supports. The
+    // buffered path takes PCM directly and bounds its own audio buffer, so the
+    // StreamingMel/mel_buf plumbing above stays null/empty for it (that
+    // plumbing's unbounded growth is issue #63; this path never enters it).
+    std::unique_ptr<pk::BufferedTdtStream> buffered;
     int mel_buffer_idx = 0;                  // next un-fed mel frame (chunk schedule)
     bool first_chunk = true;                 // chunk 0 has no pre-encode overlap
     bool finalized = false;
@@ -547,19 +554,31 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
                                                            const char* target_lang) {
     if (!ctx) return nullptr;
     if (!ctx->model) { ctx->last_error = "context has no loaded model"; return nullptr; }
-    if (!ctx->model->config().streaming.present) {
-        ctx->last_error = "model is not a cache-aware streaming model";
+    const bool cache_aware = ctx->model->config().streaming.present;
+    const bool buffered_tdt = !cache_aware &&
+        pk::BufferedTdtStream::supports(ctx->model->loader());
+    if (!cache_aware && !buffered_tdt) {
+        ctx->last_error = "model supports neither cache-aware nor buffered TDT streaming";
         return nullptr;
     }
-    // NULL / "" -> model default language (ignored by non-prompt models).
+    // NULL / "" -> model default language (ignored by non-prompt models; the
+    // offline TDT checkpoints are not prompt-conditioned, so like every other
+    // non-prompt model the requested language is ignored rather than an error).
     const std::string lang = target_lang ? target_lang : "";
     try {
         auto* s = new (std::nothrow) parakeet_stream();
         if (!s) { ctx->last_error = "out of memory"; return nullptr; }
         s->ctx = ctx;
-        s->sess = std::make_unique<pk::StreamingSession>(ctx->model->loader(), lang);
-        s->mel  = std::make_unique<pk::StreamingMel>(ctx->model->loader());
-        s->n_mels = s->mel->n_mels();
+        if (cache_aware) {
+            s->sess = std::make_unique<pk::StreamingSession>(ctx->model->loader(), lang);
+            s->mel  = std::make_unique<pk::StreamingMel>(ctx->model->loader());
+            s->n_mels = s->mel->n_mels();
+        } else {
+            // NVIDIA's buffered schedule (10 s left / 2 s chunk / 2 s right).
+            // Latency to first text is chunk + right context (~4 s), NOT the
+            // cache-aware one-chunk lag — see the header note on stream_begin.
+            s->buffered = std::make_unique<pk::BufferedTdtStream>(ctx->model->loader());
+        }
         ctx->last_error.clear();
         return s;
     } catch (const std::exception& e) {
@@ -586,6 +605,17 @@ extern "C" char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
         return nullptr;
     }
     try {
+        if (s->buffered) {
+            // Buffered TDT: PCM goes straight into the stream (it computes the
+            // window mel itself). Offline TDT vocabularies have no <EOU>/<EOB>,
+            // so *eou_out stays 0 rather than being faked.
+            s->buffered->feed_pcm(pcm, n_samples, /*is_last=*/false);
+            std::string delta = s->buffered->take_new_text();
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(delta);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         // Incremental, frame-local mel for the just-arrived PCM (no full-buffer
         // recompute). StreamingMel carries the preemph history + partial frame
         // across feeds; the emitted frames are appended to the accumulated mel.
@@ -615,6 +645,14 @@ extern "C" char* parakeet_capi_stream_finalize(parakeet_stream* s) {
     if (!s) return nullptr;
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
+        if (s->buffered) {
+            std::string delta = s->buffered->finalize();
+            s->finalized = true;
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(delta);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         // Emit the end zero-pad tail frames so the accumulated mel matches the
         // full-buffer MelFrontend::compute exactly, then flush the decoder tail.
         if (s->mel) {
@@ -645,9 +683,12 @@ extern "C" int parakeet_capi_stream_drain_events(parakeet_stream* s,
                                                  parakeet_stream_event** out_events) {
     if (out_events) *out_events = nullptr;
     if (!s || !out_events) return -1;
-    if (!s->ctx || !s->ctx->model || !s->sess) return -1;
+    if (!s->ctx || !s->ctx->model || (!s->sess && !s->buffered)) return -1;
     try {
-        std::vector<pk::EouEvent> evs = s->sess->drain_events();
+        // Buffered TDT vocabularies have no <EOU>/<EOB>, so this is always
+        // empty for them — 0 events, not an error.
+        std::vector<pk::EouEvent> evs =
+            s->sess ? s->sess->drain_events() : s->buffered->drain_events();
         s->ctx->last_error.clear();
         if (evs.empty()) return 0;
         auto* arr = static_cast<parakeet_stream_event*>(
@@ -742,6 +783,17 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
         return nullptr;
     }
     try {
+        if (s->buffered) {
+            s->buffered->feed_pcm(pcm, n_samples, /*is_last=*/false);
+            std::string delta = s->buffered->take_new_text();
+            std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
+            std::vector<pk::Word> words = s->buffered->drain_words();
+            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), events, words);
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(json);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         if (n_samples > 0) {
             int n_new = 0;
             std::vector<float> frames = s->mel->feed(pcm, n_samples, n_new);
@@ -769,6 +821,17 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
     if (!s) return nullptr;
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
+        if (s->buffered) {
+            std::string delta = s->buffered->finalize();
+            std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
+            std::vector<pk::Word> words = s->buffered->drain_words();
+            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), events, words);
+            s->finalized = true;
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(json);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         if (s->mel) {
             int n_tail = 0;
             std::vector<float> tail = s->mel->finalize(n_tail);
@@ -791,6 +854,35 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
     } catch (...) {
         s->ctx->last_error = "unknown error";
         return nullptr;
+    }
+}
+
+extern "C" int parakeet_capi_stream_reset(parakeet_stream* s) {
+    if (!s) return -1;
+    if (!s->ctx || !s->ctx->model) return -1;
+    try {
+        if (s->buffered) {
+            s->buffered->reset();
+        } else {
+            // Reset the session (encoder caches + decoder state + transcript)
+            // AND the handle's mel plumbing, so the next feed starts a fresh
+            // stream instead of replaying the old buffer's schedule position.
+            s->sess->reset();
+            s->mel->reset();
+            s->mel_buf.clear();
+            s->mel_T = 0;
+            s->mel_buffer_idx = 0;
+            s->first_chunk = true;
+        }
+        s->finalized = false;
+        s->ctx->last_error.clear();
+        return 0;
+    } catch (const std::exception& e) {
+        s->ctx->last_error = e.what();
+        return -1;
+    } catch (...) {
+        s->ctx->last_error = "unknown error";
+        return -1;
     }
 }
 

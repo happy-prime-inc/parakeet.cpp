@@ -47,6 +47,19 @@ typedef struct parakeet_ctx parakeet_ctx;
 //     KenLM) that need the raw distribution rather than this library's own
 //     greedy/beam decode. Freed with the new parakeet_capi_free_logits. The
 //     original entry points are unchanged.
+//
+// v7: the streaming API now also accepts OFFLINE TDT checkpoints
+//     (parakeet-tdt-0.6b-v2/v3): parakeet_capi_stream_begin selects buffered
+//     streaming for them (NVIDIA's 10 s left / 2 s chunk / 2 s right schedule,
+//     re-encoding the window and decoding each chunk exactly once with carried
+//     TDT state — the transcript is append-only by construction). Latency to
+//     first text is chunk + right context (~4 s), NOT the cache-aware
+//     one-chunk lag, and each 2 s of audio re-encodes a ~14 s window (compute
+//     scales accordingly). TDT vocabularies have no <EOU>/<EOB>, so *eou_out
+//     stays 0 and the events surface stays empty for them. Added
+//     parakeet_capi_stream_reset (both stream kinds): reuse a stream for a
+//     new utterance without free+begin. The original entry points are
+//     unchanged for cache-aware models.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -217,19 +230,33 @@ int parakeet_capi_transcribe_pcm_logits(parakeet_ctx* ctx, const float* samples,
 void parakeet_capi_free_logits(float* logits);
 
 // ---------------------------------------------------------------------------
-// Streaming API (cache-aware streaming RNN-T, e.g. the EOU model
-// nvidia/parakeet_realtime_eou_120m-v1). The stream session buffers incoming
-// 16 kHz mono float PCM, runs the mel front end + cache-aware StreamingEncoder +
-// carried RNN-T decoder, and surfaces newly-finalized text plus end-of-utterance
-// (<EOU>) / backchannel (<EOB>) events. No C++ exception crosses the boundary.
+// Streaming API. One set of entry points, two stream kinds, chosen by the
+// loaded model:
+//
+//   cache-aware (parakeet_realtime_eou_120m-v1, nemotron-3.5-asr-streaming):
+//     mel front end + cache-aware StreamingEncoder + carried RNN-T decoder.
+//     Latency ~ one chunk. Surfaces <EOU>/<EOB> events.
+//
+//   buffered TDT (offline parakeet-tdt-0.6b-v2/v3): re-encodes a sliding
+//     [10 s left | 2 s chunk | 2 s right] window and decodes each chunk's
+//     frames exactly once with carried TDT state, so the transcript is
+//     append-only by construction. Latency to first text = chunk + right
+//     context (~4 s); each 2 s of audio re-encodes ~14 s (compute scales
+//     accordingly). Retained audio is bounded by the window, so memory stays
+//     flat over long streams. No <EOU>/<EOB> (not in TDT vocabularies).
+//
+// Both buffer incoming 16 kHz mono float PCM and surface newly-finalized text.
+// No C++ exception crosses the boundary.
 // ---------------------------------------------------------------------------
 
 // Opaque streaming session. Begun from a loaded context; the context (and its
 // model) must outlive the stream. Free with parakeet_capi_stream_free.
 typedef struct parakeet_stream parakeet_stream;
 
-// Begin a streaming session over `ctx`'s model. Returns NULL on failure (e.g.
-// the model is not a cache-aware streaming model) and sets the ctx last error.
+// Begin a streaming session over `ctx`'s model — cache-aware when the model
+// supports it, buffered TDT for offline TDT checkpoints (see the section note
+// above for the latency/compute difference). Returns NULL on failure (the
+// model supports neither) and sets the ctx last error.
 parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
 
 // Begin a streaming session selecting the language prompt for multilingual
@@ -320,6 +347,11 @@ char* parakeet_capi_stream_feed_json(parakeet_stream* s, const float* pcm,
 char* parakeet_capi_stream_finalize_json(parakeet_stream* s);
 
 // Free a streaming session. Safe on NULL.
+// Reset the stream to a fresh utterance — encoder caches (cache-aware),
+// decoder state, transcript, events and buffered audio all cleared — without
+// free+begin. Returns 0 on success, nonzero on failure (error on the ctx).
+int parakeet_capi_stream_reset(parakeet_stream* s);
+
 void parakeet_capi_stream_free(parakeet_stream* s);
 
 // Free a string previously returned by parakeet_capi_transcribe_* /
