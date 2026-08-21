@@ -793,6 +793,11 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
     }
     try {
         if (s->buffered) {
+            // Only the JSON documents carry "tentative", so speculation is
+            // enabled here rather than at begin: a caller using the plain
+            // text entry points would otherwise pay for a preview it has no
+            // way to read.
+            s->buffered->set_speculate(true);
             s->buffered->feed_pcm(pcm, n_samples, /*is_last=*/false);
             std::string delta = s->buffered->take_new_text();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
@@ -832,6 +837,7 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
         if (s->buffered) {
+            s->buffered->set_speculate(true);
             std::string delta = s->buffered->finalize();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
             std::vector<pk::Word> words = s->buffered->drain_words();

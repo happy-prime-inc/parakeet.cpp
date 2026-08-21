@@ -8,7 +8,10 @@
 //   3. *eou_out stays 0 and drain_events returns 0 (TDT vocabularies have no
 //      <EOU>/<EOB>; the API must not fake them);
 //   4. stream_reset yields a fresh stream: the same audio again gives the
-//      same text.
+//      same text AND the same previews. Checking text alone missed a real bug —
+//      the onset watermark was not cleared by reset, so the second utterance
+//      produced no preview until its first commit, which is exactly the wait
+//      the preview exists to remove. Committed text was identical throughout.
 //
 // Env (skip 77 when absent): PARAKEET_TEST_GGUF_06B, PARAKEET_TEST_AUDIO.
 #include "parakeet_capi.h"
@@ -22,19 +25,62 @@
 #include <string>
 #include <vector>
 
+// How many distinct non-empty previews the JSON feed produced, and how early
+// the first one arrived (in feeds). Both must survive a reset.
+struct PreviewStats {
+    int distinct = 0;
+    int first_feed = -1;
+};
+
 static std::string capi_stream_text(parakeet_ctx* ctx, parakeet_stream* s,
-                                    const std::vector<float>& pcm, bool& eou_seen) {
+                                    const std::vector<float>& pcm, bool& eou_seen,
+                                    PreviewStats* previews = nullptr) {
     std::string text;
     const int block = 1600;  // 100 ms at 16 kHz, the app's capture block
     size_t at = 0;
+    int feed_index = 0;
+    std::string last_preview;
     while (at < pcm.size()) {
         const int n = (int)std::min((size_t)block, pcm.size() - at);
         int eou = 0;
-        char* t = parakeet_capi_stream_feed(s, pcm.data() + at, n, &eou);
+        char* t = nullptr;
+        if (previews) {
+            // "tentative" only exists in the JSON document, which is also what
+            // opts this stream into speculation.
+            char* doc = parakeet_capi_stream_feed_json(s, pcm.data() + at, n);
+            if (!doc) { std::fprintf(stderr, "feed_json failed: %s\n", parakeet_capi_last_error(ctx)); return text; }
+            const std::string json(doc);
+            parakeet_capi_free_string(doc);
+            const std::string key = "\"tentative\":\"";
+            const size_t k = json.find(key);
+            std::string preview;
+            if (k != std::string::npos) {
+                const size_t b = k + key.size();
+                const size_t e = json.find('"', b);
+                if (e != std::string::npos) preview = json.substr(b, e - b);
+            }
+            if (!preview.empty() && preview != last_preview) {
+                ++previews->distinct;
+                if (previews->first_feed < 0) previews->first_feed = feed_index;
+            }
+            last_preview = preview;
+            // The JSON document's "text" is the same newly-final text the plain
+            // entry point returns; parse it the same shallow way.
+            const std::string tkey = "{\"text\":\"";
+            if (json.rfind(tkey, 0) == 0) {
+                const size_t e = json.find('"', tkey.size());
+                if (e != std::string::npos) text += json.substr(tkey.size(), e - tkey.size());
+            }
+            ++feed_index;
+            at += (size_t)n;
+            continue;
+        }
+        t = parakeet_capi_stream_feed(s, pcm.data() + at, n, &eou);
         if (!t) { std::fprintf(stderr, "feed failed: %s\n", parakeet_capi_last_error(ctx)); return text; }
         if (eou) eou_seen = true;
         text += t;
         parakeet_capi_free_string(t);
+        ++feed_index;
         at += (size_t)n;
     }
     char* tail = parakeet_capi_stream_finalize(s);
@@ -87,6 +133,37 @@ int main() {
         bool eou2 = false;
         const std::string again = capi_stream_text(ctx, s, audio.samples, eou2);
         if (again != expect) { std::fprintf(stderr, "post-reset MISMATCH: %s\n", again.c_str()); ++failures; }
+    }
+
+    // Previews must survive a reset as well as committed text. Run the JSON
+    // path twice across a reset and require the second utterance to preview as
+    // early and as often as the first: a stale onset watermark leaves committed
+    // text identical while silently withholding every preview until the first
+    // commit.
+    if (parakeet_capi_stream_reset(s) != 0) {
+        std::fprintf(stderr, "reset (json) failed: %s\n", parakeet_capi_last_error(ctx)); ++failures;
+    } else {
+        bool ignored = false;
+        PreviewStats before, after;
+        const std::string first_text  = capi_stream_text(ctx, s, audio.samples, ignored, &before);
+        if (parakeet_capi_stream_reset(s) != 0) {
+            std::fprintf(stderr, "second reset failed: %s\n", parakeet_capi_last_error(ctx)); ++failures;
+        } else {
+            const std::string second_text = capi_stream_text(ctx, s, audio.samples, ignored, &after);
+            std::fprintf(stderr,
+                "previews before reset: %d distinct, first at feed %d\n"
+                "previews after  reset: %d distinct, first at feed %d\n",
+                before.distinct, before.first_feed, after.distinct, after.first_feed);
+            if (before.distinct == 0) {
+                std::fprintf(stderr, "no previews at all on the JSON path\n"); ++failures;
+            }
+            if (after.distinct != before.distinct || after.first_feed != before.first_feed) {
+                std::fprintf(stderr, "PREVIEWS DID NOT SURVIVE RESET\n"); ++failures;
+            }
+            if (second_text != first_text) {
+                std::fprintf(stderr, "json text differs across reset\n"); ++failures;
+            }
+        }
     }
 
     parakeet_capi_stream_free(s);

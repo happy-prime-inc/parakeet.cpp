@@ -72,7 +72,8 @@ static void schedule(double& left, double& chunk, double& right) {
 }
 
 static std::vector<int32_t> run(const pk::ModelLoader& ml, const std::vector<float>& pcm,
-                                int block, std::string* text_out = nullptr) {
+                                int block, std::string* text_out = nullptr,
+                                int64_t* frames_out = nullptr) {
     double left, chunk, right;
     schedule(left, chunk, right);
     pk::BufferedTdtStream stream(ml, left, chunk, right);
@@ -89,6 +90,7 @@ static std::vector<int32_t> run(const pk::ModelLoader& ml, const std::vector<flo
     }
     stream.finalize();
     if (text_out) *text_out = stream.text();
+    if (frames_out) *frames_out = stream.frames_decoded();
     return stream.tokens();
 }
 
@@ -134,6 +136,30 @@ int main() {
         std::fprintf(stderr, "block=%-6d tokens=%-5zu %s\n",
                      block, got.size(), same ? "match" : "MISMATCH");
         if (!same) ++failures;
+    }
+
+    // Every encoder frame produced from real audio must be decoded, including
+    // the partial one a stream that does not end on an encoder-frame boundary
+    // produces. Flooring the final chunk's endpoint silently discarded it, and
+    // token parity did not notice because the fixture happens to emit nothing
+    // on that frame — so assert the frame count directly rather than trusting a
+    // fixture to land a word there.
+    {
+        const auto& cfg = ml.config();
+        const int64_t hop = cfg.hop_length ? (int64_t)cfg.hop_length : 160;
+        const int64_t sub = cfg.subsampling_factor ? (int64_t)cfg.subsampling_factor : 8;
+        const int64_t enc_frame = hop * sub;
+        const int64_t n = (int64_t)audio.samples.size();
+        const int64_t expect = (n + enc_frame - 1) / enc_frame;  // ceiling
+        int64_t got = 0;
+        run(ml, audio.samples, /*block=*/1600, nullptr, &got);
+        std::fprintf(stderr, "frames decoded=%lld expected=%lld (%lld samples)\n",
+                     (long long)got, (long long)expect, (long long)n);
+        if (got != expect) {
+            std::fprintf(stderr, "END-OF-STREAM FRAME LOSS: %lld frame(s) never decoded\n",
+                         (long long)(expect - got));
+            ++failures;
+        }
     }
 
     if (const char* baseline = std::getenv("PARAKEET_TEST_NEMO_BASELINE")) {

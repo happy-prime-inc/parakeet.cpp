@@ -107,9 +107,10 @@ public:
     // Set to 0 to disable.
     void set_onset_preview_secs(double secs) { onset_min_secs_ = secs; }
 
-    // Speculation costs one decoder pass over frames the encoder has already
-    // produced (no extra encode), so it is on by default. Turn it off to save
-    // that pass, or to assert that committed output does not depend on it.
+    // Speculation is OFF by default: the tail preview costs a decoder pass and
+    // the opening preview costs an encoder pass, and a caller that cannot read
+    // tentative_text() would be paying for output it can never observe. Callers
+    // that surface previews opt in.
     void set_speculate(bool on) { speculate_ = on; if (!on) tentative_.clear(); }
 
     // How far into the right-context region to preview, in seconds. Frames
@@ -134,6 +135,11 @@ public:
     // Audio samples retained right now. Bounded by left+chunk+right — the
     // buffer never grows with stream length.
     size_t buffered_samples() const { return audio_.size(); }
+
+    // Encoder frames committed so far. At end of stream this must account for
+    // every frame the encoder produced from real audio, including the partial
+    // one a stream that does not end on an 80 ms boundary produces.
+    int64_t frames_decoded() const { return state_.frames_seen; }
 
 private:
     // Decode every chunk whose right context is available. `flush` also decodes
@@ -172,7 +178,7 @@ private:
     int64_t total_seen_ = 0;        // absolute samples fed so far
     int64_t next_chunk_ = 0;        // absolute sample index of the next chunk
     bool    finished_ = false;
-    bool    speculate_ = true;
+    bool    speculate_ = false;
     double  preview_secs_ = 0.0;   // <=0 = the whole right-context region
     double  onset_min_secs_ = 0.4; // audio needed before the first preview
     int64_t onset_last_ = 0;       // samples at the last onset preview

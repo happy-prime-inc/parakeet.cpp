@@ -59,6 +59,11 @@ void BufferedTdtStream::reset() {
     total_seen_   = 0;
     next_chunk_   = 0;
     finished_     = false;
+    // Must be cleared with the rest: total_seen_ restarts at zero, so a stale
+    // watermark from the previous utterance suppresses the onset preview until
+    // the new one catches up to it — which is roughly the normal 4s commit
+    // point, i.e. exactly the wait the onset preview exists to remove.
+    onset_last_   = 0;
     tentative_.clear();
 }
 
@@ -157,8 +162,17 @@ void BufferedTdtStream::drain_ready(bool flush, std::vector<int32_t>& out) {
         // the chunk offset therefore skipped encoder frame 0 of the very first
         // chunk on every stream.
         const int64_t enc_frame = (int64_t)hop_ * sub_factor_;
+        // `first` is always frame-aligned: next_chunk_ advances by whole chunks
+        // and lo trails it by whole left contexts. `last` is NOT, on the final
+        // flush — commit_hi is then total_seen_, which the speaker did not
+        // arrange to be a multiple of 80 ms. Flooring there silently discards
+        // the encoder's last output frame and with it any word that ends in it.
+        // NeMo takes encoder_output_len - left for its final chunk; rounding up
+        // is the same thing expressed in this code's terms, and is a no-op for
+        // every aligned chunk.
+        const int64_t span = commit_hi - lo;
         const int first = std::min<int>(Tw, (int)((next_chunk_ - lo) / enc_frame));
-        const int last  = std::min<int>(Tw, (int)((commit_hi  - lo) / enc_frame));
+        const int last  = std::min<int>(Tw, (int)((span + enc_frame - 1) / enc_frame));
         if (last <= first) { next_chunk_ = commit_hi; continue; }
 
         // Channels-first [d_model, Tw] -> time-major [n, d_model].

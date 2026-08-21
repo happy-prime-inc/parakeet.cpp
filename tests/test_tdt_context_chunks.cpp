@@ -17,7 +17,15 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <sys/resource.h>
+// Peak-RSS reporting is a benchmark nicety, not part of the parity assertion,
+// so it must not stop this test building anywhere. getrusage/rusage are POSIX
+// and absent on MSVC, where the metric is simply reported as 0.
+#if defined(_WIN32)
+#  define PARAKEET_HAVE_GETRUSAGE 0
+#else
+#  define PARAKEET_HAVE_GETRUSAGE 1
+#  include <sys/resource.h>
+#endif
 
 static int ceil_div8(int n) { return n <= 0 ? 0 : (n + 7) / 8; }
 
@@ -188,12 +196,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\n");
         if (edits != 0) return 1;
     }
+#if PARAKEET_HAVE_GETRUSAGE
     struct rusage usage {};
     getrusage(RUSAGE_SELF, &usage);
-#if defined(__APPLE__)
+#  if defined(__APPLE__)
     const double peak_rss_mib = usage.ru_maxrss / (1024.0 * 1024.0);
-#else
+#  else
     const double peak_rss_mib = usage.ru_maxrss / 1024.0;
+#  endif
+#else
+    const double peak_rss_mib = 0.0;  // not measured on this platform
 #endif
     const auto ms = [](auto a, auto b) {
         return std::chrono::duration<double, std::milli>(b - a).count();
