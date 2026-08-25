@@ -7,6 +7,7 @@
 #include "prompt_kernel.hpp"
 #include "decode_types.hpp"
 #include "transcription.hpp"
+#include "transcript_stream.hpp"
 #include <functional>
 #include <memory>
 #include <string>
@@ -15,21 +16,8 @@
 
 namespace pk {
 
-// End-of-utterance / backchannel event emitted by the streaming decoder.
-//
-// The model nvidia/parakeet_realtime_eou_120m-v1 emits <EOU> (id 1024) and
-// <EOB> (id 1025) as regular vocab tokens to mark end-of-utterance /
-// backchannel. We surface them as events (stripped from the running text) with
-// the encoder frame on which they were emitted and a wall-clock time:
-//   time_sec = encoder_frame * hop_length * subsampling_factor / sample_rate
-// (the subsampled encoder frame stride in seconds), matching NeMo's
-// _get_eou_predictions_from_hypotheses timestamp scaling.
-struct EouEvent {
-    int32_t token = 0;             // the special token id (<EOU> or <EOB>)
-    bool    is_eob = false;        // true for <EOB>, false for <EOU>
-    int     encoder_frame = 0;     // encoder-output frame index of the emission
-    double  time_sec = 0.0;        // encoder_frame * hop * subsampling / sample_rate
-};
+// `EouEvent` now lives in transcript_stream.hpp, alongside the transcript
+// bookkeeping that produces it, so the buffered TDT path can share it.
 
 // Cache-aware streaming RNN-T session for the pure-RNNT streaming model
 // nvidia/parakeet_realtime_eou_120m-v1.
@@ -97,14 +85,14 @@ public:
 
     // Running transcript with <EOU>/<EOB> STRIPPED (specials surface as events,
     // not text), detokenized from the non-special emitted tokens.
-    const std::string& text() const { return text_; }
+    const std::string& text() const { return acc_.text(); }
 
     // The text appended since the previous take_new_text()/feed call — the
     // "newly-finalized text". Resets the delta marker. Returns "" if none.
     std::string take_new_text();
 
     // True iff the most recent feed_mel_chunk emitted an <EOU>/<EOB> event.
-    bool last_chunk_had_eou() const { return last_chunk_had_eou_; }
+    bool last_chunk_had_eou() const { return acc_.last_step_had_eou(); }
 
     // Move out all EOU/EOB events collected so far (drains the queue).
     std::vector<EouEvent> drain_events();
@@ -112,7 +100,7 @@ public:
     // Peek at the not-yet-drained EOU/EOB events without consuming them (the
     // C-API uses the size as a watermark to attribute events to one feed pass
     // while leaving the queue intact for a later drain).
-    const std::vector<EouEvent>& events() const { return events_; }
+    const std::vector<EouEvent>& events() const { return acc_.events(); }
 
     // Move out the WORDS finalized since the previous drain_words() call, with
     // per-word start/end (seconds) and 'min'-aggregate confidence (matching the
@@ -130,10 +118,6 @@ public:
     int valid_out_len() const { return enc_.valid_out_len(); }
 
 private:
-    // Recompute text_ from the non-special tokens in state_.hyp and append any
-    // brand-new EOU/EOB events found beyond events_seen_tokens_.
-    void process_emitted(const std::vector<int32_t>& emitted);
-
     const ModelLoader& ml_;
     StreamingEncoder enc_;
     PredictionNet pred_;
@@ -145,38 +129,9 @@ private:
     int max_symbols_;
     RnntDecodeState state_;
 
-    // EOU/EOB token ids (resolved from the tokenizer pieces; -1 if absent).
-    int eou_id_ = -1;
-    int eob_id_ = -1;
-    double frame_sec_ = 0.0;       // hop * subsampling / sample_rate (per enc frame)
-    int enc_frame_ = 0;            // running encoder-output frame counter
-
-    // Running stripped transcript + delta marker.
-    std::vector<int32_t> non_special_;  // non-special tokens, for detokenize
-    std::string text_;
-    size_t text_taken_ = 0;        // byte offset of text_ already returned
-
-    bool last_chunk_had_eou_ = false;
-    std::vector<EouEvent> events_;
-
-    // Per-word timestamp accumulation. `word_tokens_` holds the per-token
-    // TokenInfo (absolute frame, conf, span) for the NON-SPECIAL tokens emitted
-    // so far, in emission order — the same input pk::group_words consumes
-    // offline. We regroup the whole accumulated sequence after each chunk and
-    // surface words that are now FINAL (followed by a later word-start, so their
-    // text + end-offset can't change). `words_finalized_` counts how many of the
-    // regrouped words are already considered final; `words_taken_` how many have
-    // been handed out by drain_words(). finalize() flushes the trailing word.
-    std::vector<TokenInfo> word_tokens_;
-    std::vector<Word> words_;       // last regrouping of word_tokens_
-    size_t words_finalized_ = 0;    // # of words_ that are final (safe to emit)
-    size_t words_taken_ = 0;        // # of words already returned by drain_words()
-    float frame_sec_f_ = 0.0f;      // frame_sec as float (group_words uses float)
-
-    // Regroup word_tokens_ into words_ and advance words_finalized_ to all but
-    // the last (still-open) word — flush_all=true (finalize) makes every word
-    // final, including the trailing one.
-    void regroup_words(bool flush_all);
+    // Running transcript, <EOU>/<EOB> events and per-word timestamps. Shared
+    // with the buffered TDT path — see transcript_stream.hpp.
+    TranscriptAccumulator acc_;
 };
 
 // Drive a StreamingSession over a whole 16 kHz mono PCM clip in the model's
