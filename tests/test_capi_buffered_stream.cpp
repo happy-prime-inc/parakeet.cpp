@@ -127,13 +127,11 @@ int main() {
     if (n_evs != 0) { std::fprintf(stderr, "drain_events=%d, want 0\n", n_evs); ++failures; }
     parakeet_capi_free_events(evs);
 
-    if (parakeet_capi_stream_reset(s) != 0) {
-        std::fprintf(stderr, "reset failed: %s\n", parakeet_capi_last_error(ctx)); ++failures;
-    } else {
-        bool eou2 = false;
-        const std::string again = capi_stream_text(ctx, s, audio.samples, eou2);
-        if (again != expect) { std::fprintf(stderr, "post-reset MISMATCH: %s\n", again.c_str()); ++failures; }
-    }
+    // Reset is checked once, on the JSON path below, rather than twice. The
+    // plain path's reset calls the same parakeet_capi_stream_reset and differs
+    // only in speculation being off — and the JSON version is the stronger
+    // test, since a reset that forgets the preview watermark leaves committed
+    // text identical while silently withholding every preview.
 
     // Previews must survive a reset as well as committed text. Run the JSON
     // path twice across a reset and require the second utterance to preview as

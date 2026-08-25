@@ -123,15 +123,24 @@ int main() {
         audio.samples.size() / 16000.0);
     if (oracle.empty()) { std::fprintf(stderr, "one-shot produced nothing\n"); return 1; }
 
-    // 1600 = 100 ms, the app's capture block. 1237 and 999 are deliberately not
-    // multiples of the 160-sample hop, so frames straddle feed boundaries.
-    // PARAKEET_TEST_ONESHOT_ONLY skips this loop: a latency/accuracy sweep
-    // over a 200s file needs the transcript once, not seven decodes of it.
+    // Four sizes, one per distinct hazard, rather than a handful that mostly
+    // repeat each other: 7 = many feeds inside a single encoder frame;
+    // 999 = smaller than an encoder frame and not a multiple of the 160-sample
+    // hop, so frames straddle feeds; 1600 = the app's real 100 ms capture
+    // block; 32000 = a whole chunk in one feed. (1237 used to be here beside
+    // 999 and exercised the same sub-frame, non-hop-multiple case.)
+    //
+    // The 1600 run doubles as the end-of-stream frame check below, so no size
+    // is decoded twice. PARAKEET_TEST_ONESHOT_ONLY skips the loop entirely for
+    // sweeps that only want the transcript.
     int failures = 0;
+    int64_t frames_at_1600 = -1;
     const bool oneshot_only = std::getenv("PARAKEET_TEST_ONESHOT_ONLY") != nullptr;
     for (int block : oneshot_only ? std::initializer_list<int>{}
-                                  : std::initializer_list<int>{1600, 1237, 999, 32000, 7}) {
-        const std::vector<int32_t> got = run(ml, audio.samples, block);
+                                  : std::initializer_list<int>{7, 999, 1600, 32000}) {
+        int64_t frames = 0;
+        const std::vector<int32_t> got = run(ml, audio.samples, block, nullptr, &frames);
+        if (block == 1600) frames_at_1600 = frames;
         const bool same = (got == oracle);
         std::fprintf(stderr, "block=%-6d tokens=%-5zu %s\n",
                      block, got.size(), same ? "match" : "MISMATCH");
@@ -144,20 +153,18 @@ int main() {
     // token parity did not notice because the fixture happens to emit nothing
     // on that frame — so assert the frame count directly rather than trusting a
     // fixture to land a word there.
-    {
+    if (frames_at_1600 >= 0) {
         const auto& cfg = ml.config();
         const int64_t hop = cfg.hop_length ? (int64_t)cfg.hop_length : 160;
         const int64_t sub = cfg.subsampling_factor ? (int64_t)cfg.subsampling_factor : 8;
         const int64_t enc_frame = hop * sub;
         const int64_t n = (int64_t)audio.samples.size();
         const int64_t expect = (n + enc_frame - 1) / enc_frame;  // ceiling
-        int64_t got = 0;
-        run(ml, audio.samples, /*block=*/1600, nullptr, &got);
         std::fprintf(stderr, "frames decoded=%lld expected=%lld (%lld samples)\n",
-                     (long long)got, (long long)expect, (long long)n);
-        if (got != expect) {
+                     (long long)frames_at_1600, (long long)expect, (long long)n);
+        if (frames_at_1600 != expect) {
             std::fprintf(stderr, "END-OF-STREAM FRAME LOSS: %lld frame(s) never decoded\n",
-                         (long long)(expect - got));
+                         (long long)(expect - frames_at_1600));
             ++failures;
         }
     }
