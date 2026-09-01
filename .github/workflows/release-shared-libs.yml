@@ -15,9 +15,8 @@ on:
   workflow_dispatch:
     inputs:
       source_ref:
-        description: Exact commit or branch to build
+        description: Exact 40-character commit SHA to build
         required: true
-        default: master
         type: string
       release_tag:
         description: Release tag and artifact version
@@ -257,6 +256,28 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
+          if ! [[ "$SOURCE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::source_ref must be an exact 40-character commit SHA, got: $SOURCE_REF"
+            exit 1
+          fi
+
+          SOURCE_SHA=$(gh api "repos/$REPOSITORY/commits/$SOURCE_REF" --jq .sha)
+          if [ "$SOURCE_SHA" != "$SOURCE_REF" ]; then
+            echo "::error::source_ref resolved to $SOURCE_SHA instead of itself"
+            exit 1
+          fi
+
+          # A release can pre-exist, but its tag must identify the exact source
+          # these binaries were built from. This prevents a later tag workflow
+          # from rebuilding the same filenames from older code.
+          if gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --silent >/dev/null 2>&1; then
+            TAG_SHA=$(gh api "repos/$REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+            if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
+              echo "::error::$RELEASE_TAG points at $TAG_SHA, but assets were built from $SOURCE_SHA"
+              exit 1
+            fi
+          fi
+
           if ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --draft \
               --target "$SOURCE_REF" --title "$RELEASE_TAG" \
