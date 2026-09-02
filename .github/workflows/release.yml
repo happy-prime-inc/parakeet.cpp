@@ -246,9 +246,11 @@ jobs:
           if-no-files-found: error
 
       # Shared C-API lib (issue #25): a separate build so the CLI bundle above
-      # stays a single self-contained binary. PARAKEET_SHARED=ON folds ggml into
-      # libparakeet.so the same way it is folded into the CLI.
+      # stays a single self-contained binary. The CPU libraries are deliberately
+      # owned by release-shared-libs.yml; publishing them here too caused a tag
+      # build from an older commit to clobber the verified ABI-7 assets.
       - name: Configure (shared C-API lib)
+        if: matrix.backend != 'cpu'
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
@@ -270,9 +272,11 @@ jobs:
             ${EXTRA:+"$EXTRA"}
 
       - name: Build (shared C-API lib)
+        if: matrix.backend != 'cpu'
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
 
       - name: Package (shared C-API lib)
+        if: matrix.backend != 'cpu'
         id: pack_lib
         run: |
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
@@ -288,6 +292,7 @@ jobs:
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
 
       - name: Upload shared C-API lib artifact
+        if: matrix.backend != 'cpu'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack_lib.outputs.bundle }}
@@ -375,8 +380,10 @@ jobs:
           path: ${{ steps.pack.outputs.bundle }}.tar.gz
           if-no-files-found: error
 
-      # Shared C-API lib (issue #25). Separate build, same reasoning as linux.
+      # The scoped workflow owns the arm64 Metal library used downstream. The
+      # general release still owns the Intel CPU shared library.
       - name: Configure (shared C-API lib)
+        if: matrix.backend != 'metal' || matrix.arch != 'arm64'
         run: |
           cmake -B build-shared \
             -DCMAKE_BUILD_TYPE=Release \
@@ -390,9 +397,11 @@ jobs:
             ${{ matrix.cmake_args }}
 
       - name: Build (shared C-API lib)
+        if: matrix.backend != 'metal' || matrix.arch != 'arm64'
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
 
       - name: Package (shared C-API lib)
+        if: matrix.backend != 'metal' || matrix.arch != 'arm64'
         id: pack_lib
         run: |
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-macos-${{ matrix.backend }}-${{ matrix.arch }}"
@@ -402,6 +411,7 @@ jobs:
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
 
       - name: Upload shared C-API lib artifact
+        if: matrix.backend != 'metal' || matrix.arch != 'arm64'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack_lib.outputs.bundle }}
@@ -526,10 +536,12 @@ jobs:
           path: ${{ steps.pack.outputs.bundle }}.zip
           if-no-files-found: error
 
-      # Shared C-API lib (issue #25). Separate build, same reasoning as linux.
+      # The scoped workflow owns the Windows CPU library. Vulkan and CUDA
+      # shared libraries remain part of this full release matrix.
       # WINDOWS_EXPORT_ALL_SYMBOLS (set in CMakeLists) makes the DLL export its
       # extern "C" entry points so ctypes/dlopen can find them.
       - name: Configure (shared C-API lib)
+        if: matrix.backend != 'cpu'
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
@@ -546,9 +558,11 @@ jobs:
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 
       - name: Build (shared C-API lib)
+        if: matrix.backend != 'cpu'
         run: cmake --build build-shared -j
 
       - name: Package (shared C-API lib)
+        if: matrix.backend != 'cpu'
         id: pack_lib
         shell: pwsh
         run: |
@@ -559,6 +573,7 @@ jobs:
           "bundle=$bundle" | Out-File -Append $env:GITHUB_OUTPUT
 
       - name: Upload shared C-API lib artifact
+        if: matrix.backend != 'cpu'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack_lib.outputs.bundle }}
