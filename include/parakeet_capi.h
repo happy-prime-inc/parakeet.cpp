@@ -65,6 +65,9 @@ typedef struct parakeet_ctx parakeet_ctx;
 //     belongs in a caller's tentative/dimmed tier; "text" and "words" remain
 //     append-only and are unaffected by it. The original entry points are
 //     unchanged for cache-aware models.
+//
+// v8: added parakeet_capi_stream_set_speculate so latency-sensitive callers
+//     can disable buffered-TDT previews without losing JSON word timestamps.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -356,6 +359,13 @@ char* parakeet_capi_stream_finalize_json(parakeet_stream* s);
 // decoder state, transcript, events and buffered audio all cleared — without
 // free+begin. Returns 0 on success, nonzero on failure (error on the ctx).
 int parakeet_capi_stream_reset(parakeet_stream* s);
+
+// Control speculative previews for buffered streaming of offline TDT models.
+// Enabled by default for backward compatibility. Disabling removes the extra
+// opening encoder passes and tail decoder preview while committed text, words,
+// timestamps and stream state remain unchanged. Cache-aware streams accept the
+// setting as a no-op. Returns 0 on success, -1 for an invalid stream.
+int parakeet_capi_stream_set_speculate(parakeet_stream* s, int enabled);
 
 void parakeet_capi_stream_free(parakeet_stream* s);
 
