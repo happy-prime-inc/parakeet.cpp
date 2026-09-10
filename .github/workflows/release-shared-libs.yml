@@ -75,12 +75,13 @@ jobs:
           import ctypes
           lib = ctypes.CDLL("./build-shared/libparakeet.so")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 7
+          assert lib.parakeet_capi_abi_version() == 8
           for name in (
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
               "parakeet_capi_stream_reset",
+              "parakeet_capi_stream_set_speculate",
               "parakeet_capi_stream_free",
           ):
               getattr(lib, name)
@@ -137,12 +138,13 @@ jobs:
           import ctypes
           lib = ctypes.CDLL("./build-shared/libparakeet.dylib")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 7
+          assert lib.parakeet_capi_abi_version() == 8
           for name in (
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
               "parakeet_capi_stream_reset",
+              "parakeet_capi_stream_set_speculate",
               "parakeet_capi_stream_free",
           ):
               getattr(lib, name)
@@ -203,12 +205,13 @@ jobs:
           import ctypes
           lib = ctypes.CDLL(r"build-shared\parakeet.dll")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 7
+          assert lib.parakeet_capi_abi_version() == 8
           for name in (
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
               "parakeet_capi_stream_reset",
+              "parakeet_capi_stream_set_speculate",
               "parakeet_capi_stream_free",
           ):
               getattr(lib, name)

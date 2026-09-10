@@ -36,7 +36,10 @@
 // v6: transcribe_pcm_logits, exposing the CTC head's log-prob matrix (row-major
 //     [T, vocab+1], already log-softmaxed) instead of decoded text, freed with
 //     the new free_logits. Original entry points unchanged.
-#define PARAKEET_CAPI_ABI_VERSION 7
+// v7: buffered streaming for offline TDT checkpoints and stream_reset.
+// v8: stream_set_speculate lets latency-sensitive callers disable optional
+//     preview work while retaining JSON word timestamps.
+#define PARAKEET_CAPI_ABI_VERSION 8
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -80,6 +83,9 @@ struct parakeet_stream {
     int mel_buffer_idx = 0;                  // next un-fed mel frame (chunk schedule)
     bool first_chunk = true;                 // chunk 0 has no pre-encode overlap
     bool finalized = false;
+    // JSON historically enables buffered-TDT previews automatically. Preserve
+    // that default while letting CPU-bound callers disable the extra work.
+    bool speculate = true;
 };
 
 namespace {
@@ -797,7 +803,7 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
             // enabled here rather than at begin: a caller using the plain
             // text entry points would otherwise pay for a preview it has no
             // way to read.
-            s->buffered->set_speculate(true);
+            s->buffered->set_speculate(s->speculate);
             s->buffered->feed_pcm(pcm, n_samples, /*is_last=*/false);
             std::string delta = s->buffered->take_new_text();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
@@ -837,7 +843,7 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
         if (s->buffered) {
-            s->buffered->set_speculate(true);
+            s->buffered->set_speculate(s->speculate);
             std::string delta = s->buffered->finalize();
             std::vector<pk::EouEvent> events;  // no <EOU>/<EOB> in TDT vocabs
             std::vector<pk::Word> words = s->buffered->drain_words();
@@ -901,6 +907,14 @@ extern "C" int parakeet_capi_stream_reset(parakeet_stream* s) {
         s->ctx->last_error = "unknown error";
         return -1;
     }
+}
+
+extern "C" int parakeet_capi_stream_set_speculate(parakeet_stream* s, int enabled) {
+    if (!s || !s->ctx || !s->ctx->model) return -1;
+    s->speculate = enabled != 0;
+    if (s->buffered) s->buffered->set_speculate(s->speculate);
+    s->ctx->last_error.clear();
+    return 0;
 }
 
 extern "C" void parakeet_capi_stream_free(parakeet_stream* s) {

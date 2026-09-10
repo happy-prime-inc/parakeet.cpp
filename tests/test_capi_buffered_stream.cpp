@@ -1,4 +1,4 @@
-// The streaming C API driving an OFFLINE TDT checkpoint (ABI v7).
+// The streaming C API driving an OFFLINE TDT checkpoint (ABI v8).
 //
 // Checks, against the same clip fed as 100 ms blocks:
 //   1. begin succeeds for a TDT model (the v6 API refused it);
@@ -11,7 +11,8 @@
 //      same text AND the same previews. Checking text alone missed a real bug —
 //      the onset watermark was not cleared by reset, so the second utterance
 //      produced no preview until its first commit, which is exactly the wait
-//      the preview exists to remove. Committed text was identical throughout.
+//      the preview exists to remove. Committed text was identical throughout;
+//   5. callers can disable previews without changing committed text.
 //
 // Env (skip 77 when absent): PARAKEET_TEST_GGUF_06B, PARAKEET_TEST_AUDIO.
 #include "parakeet_capi.h"
@@ -164,6 +165,30 @@ int main() {
                 std::fprintf(stderr, "json text differs across reset\n"); ++failures;
             }
         }
+    }
+
+    // CPU-bound consumers need the JSON word/timestamp surface but may not be
+    // able to afford the opening encoder pass every 400 ms. Disabling preview
+    // work must leave the committed transcript identical and tentative empty.
+    if (parakeet_capi_stream_reset(s) != 0 ||
+        parakeet_capi_stream_set_speculate(s, 0) != 0) {
+        std::fprintf(stderr, "could not disable speculation: %s\n",
+                     parakeet_capi_last_error(ctx));
+        ++failures;
+    } else {
+        bool ignored = false;
+        PreviewStats disabled;
+        const std::string without_previews =
+            capi_stream_text(ctx, s, audio.samples, ignored, &disabled);
+        if (without_previews != expect) {
+            std::fprintf(stderr, "disabled-preview text mismatch\n"); ++failures;
+        }
+        if (disabled.distinct != 0 || disabled.first_feed != -1) {
+            std::fprintf(stderr, "preview emitted while disabled\n"); ++failures;
+        }
+    }
+    if (parakeet_capi_stream_set_speculate(nullptr, 0) != -1) {
+        std::fprintf(stderr, "NULL stream accepted by set_speculate\n"); ++failures;
     }
 
     parakeet_capi_stream_free(s);

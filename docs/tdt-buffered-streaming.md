@@ -64,6 +64,13 @@ Speculation is **off by default** — a caller that cannot read `tentative_text(
 would be paying for output it can never observe. The streaming JSON entry points
 enable it, since they are the only way to observe it.
 
+ABI v8 callers may disable those previews with
+`parakeet_capi_stream_set_speculate(stream, 0)` while continuing to use the JSON
+entry points for committed words and timestamps. This is intended for CPU-bound
+real-time consumers: the opening preview re-encodes a growing window every 400 ms
+until the first chunk commits, which can create a backlog on slower processors.
+Committed text is unchanged.
+
 ## Parity
 
 Token-exact against NeMo's
