@@ -68,6 +68,11 @@ typedef struct parakeet_ctx parakeet_ctx;
 //
 // v8: added parakeet_capi_stream_set_speculate so latency-sensitive callers
 //     can disable buffered-TDT previews without losing JSON word timestamps.
+// v9: added parakeet_capi_device_name, returning the name of the compute
+//     device actually in use ("cpu", or the ggml registry name for a GPU
+//     backend). A caller that requested a specific device via PARAKEET_DEVICE
+//     or GGML_VK_VISIBLE_DEVICES had no way to confirm the request was
+//     honored rather than silently falling back — this closes that gap.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -76,6 +81,16 @@ parakeet_ctx* parakeet_capi_load(const char* gguf_path);
 
 // Free a context obtained from parakeet_capi_load. Safe on NULL.
 void parakeet_capi_free(parakeet_ctx* ctx);
+
+// Name of the compute device the model is actually running on: "cpu", or the
+// ggml registry device name for a GPU backend (e.g. a CUDA/Vulkan device
+// name). This is a process-global fact, not per-context — every loaded model
+// in this process shares one compute backend — so `ctx` is only checked for
+// NULL (returns "" as parakeet_capi_last_error does) rather than read.
+// Forces the backend to be selected if it has not run yet, so it is safe to
+// call immediately after parakeet_capi_load without first transcribing
+// anything.
+const char* parakeet_capi_device_name(parakeet_ctx* ctx);
 
 // Transcribe a WAV file. `decoder` selects the head:
 //   0 = default (by arch: transducer for tdt/rnnt/hybrid, CTC for ctc),

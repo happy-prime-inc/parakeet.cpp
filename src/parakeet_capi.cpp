@@ -1,5 +1,7 @@
 #include "parakeet_capi.h"
+#include "backend.hpp"    // pk::Backend (global_backend()'s return type)
 #include "buffered_window.hpp"
+#include "ggml_graph.hpp" // pk::global_backend
 #include "parakeet.h"     // pk::Decoder
 #include "model.hpp"      // pk::Model
 #include "streaming.hpp"  // pk::StreamingSession
@@ -39,7 +41,12 @@
 // v7: buffered streaming for offline TDT checkpoints and stream_reset.
 // v8: stream_set_speculate lets latency-sensitive callers disable optional
 //     preview work while retaining JSON word timestamps.
-#define PARAKEET_CAPI_ABI_VERSION 8
+// v9: device_name returns the name of the compute device actually in use
+//     ("cpu", or the ggml registry name for a GPU backend). A caller that
+//     requested a specific device via PARAKEET_DEVICE or
+//     GGML_VK_VISIBLE_DEVICES had no way to confirm the request was honored
+//     rather than silently falling back — this closes that gap.
+#define PARAKEET_CAPI_ABI_VERSION 9
 
 // The opaque context: a loaded model plus a buffer for the last error message.
 struct parakeet_ctx {
@@ -157,6 +164,14 @@ extern "C" parakeet_ctx* parakeet_capi_load(const char* gguf_path) {
 
 extern "C" void parakeet_capi_free(parakeet_ctx* ctx) {
     delete ctx;  // safe on nullptr; ~unique_ptr releases the model.
+}
+
+extern "C" const char* parakeet_capi_device_name(parakeet_ctx* ctx) {
+    // The compute device is a process-global choice (pk::global_backend()),
+    // not per-context, so ctx is only checked for NULL — matching
+    // parakeet_capi_last_error's "" on NULL rather than actually being read.
+    if (!ctx) return "";
+    return pk::global_backend().device_name();
 }
 
 extern "C" char* parakeet_capi_transcribe_path_lang(parakeet_ctx* ctx,
