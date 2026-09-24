@@ -112,10 +112,13 @@ Backend::Backend(int n_threads) : impl_(new Impl()) {
             impl_->backend = ggml_backend_dev_init(dev, nullptr);
             if (impl_->backend) {
                 device_name_ = name ? name : "";
+                const char* desc = ggml_backend_dev_description(dev);
+                device_description_ = desc ? desc : device_name_;
                 // Route compute through ggml_backend_sched for any non-CPU device
                 // so unsupported ops can fall back to CPU.
                 impl_->use_sched = type != GGML_BACKEND_DEVICE_TYPE_CPU;
-                PK_LOG("pk::Backend using device: %s", device_name_.c_str());
+                PK_LOG("pk::Backend using device: %s (%s)", device_name_.c_str(),
+                       device_description_.c_str());
                 break;
             }
         }

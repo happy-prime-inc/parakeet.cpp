@@ -7,6 +7,7 @@ function(pk_add_test name)
 endfunction()
 
 pk_add_test(test_smoke)
+pk_add_test(test_capi_device_name)
 pk_add_test(test_nbest_json)
 pk_add_test(test_tdt_beam_core)
 pk_add_test(test_backend_device)

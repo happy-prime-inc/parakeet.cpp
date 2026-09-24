@@ -68,6 +68,16 @@ typedef struct parakeet_ctx parakeet_ctx;
 //
 // v8: added parakeet_capi_stream_set_speculate so latency-sensitive callers
 //     can disable buffered-TDT previews without losing JSON word timestamps.
+// v9: added parakeet_capi_device_name and parakeet_capi_device_description. A
+//     caller that requested a specific device via PARAKEET_DEVICE or
+//     GGML_VK_VISIBLE_DEVICES had no way to confirm the request was honored
+//     rather than silently falling back — this closes that gap.
+//     device_name is a registry ordinal ("cpu", "Vulkan0", "CUDA0") that
+//     depends on which devices are currently visible, so it cannot
+//     distinguish one physical GPU from another once visibility has been
+//     filtered to a single device; device_description is the backend's own
+//     device string (e.g. "NVIDIA GeForce RTX 3080") and identifies the
+//     physical device.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -76,6 +86,39 @@ parakeet_ctx* parakeet_capi_load(const char* gguf_path);
 
 // Free a context obtained from parakeet_capi_load. Safe on NULL.
 void parakeet_capi_free(parakeet_ctx* ctx);
+
+// Name of the compute device the model is actually running on: "cpu", or the
+// ggml registry device name for a GPU backend (e.g. "Vulkan0", "CUDA0").
+//
+// This is a REGISTRY ORDINAL, not a physical device identity: it reflects
+// this device's position within whatever set ggml's backend currently
+// considers visible (itself affected by backend-specific filtering, e.g.
+// GGML_VK_VISIBLE_DEVICES for Vulkan). Restricting visibility to exactly one
+// physical device always reports it as ordinal 0 ("Vulkan0"), regardless of
+// which physical device that is. To confirm WHICH physical GPU was selected,
+// use parakeet_capi_device_description instead — this is only enough to
+// confirm GPU-vs-CPU fallback, or an exact registry-name match.
+//
+// The returned pointer is a process-global fact, not per-context — every
+// loaded model in this process shares one compute backend. It is borrowed,
+// owned by the backend, and must NOT be freed; it remains valid for the
+// life of the process (until the backend is shut down at exit). `ctx` is
+// only checked for NULL (returns "" as parakeet_capi_last_error does) rather
+// than read. Forces the backend to be selected if it has not run yet, so
+// it is safe to call immediately after parakeet_capi_load without first
+// transcribing anything.
+const char* parakeet_capi_device_name(parakeet_ctx* ctx);
+
+// Human-readable description of the compute device actually in use: "cpu",
+// or the backend's own device string for a GPU (e.g. "NVIDIA GeForce RTX
+// 3080" for Vulkan/CUDA). Unlike parakeet_capi_device_name, this identifies
+// the physical device rather than its position in a filtered registry, so
+// it's the one to use to confirm WHICH GPU was actually selected.
+//
+// Same lifetime, ownership, and NULL-ctx contract as
+// parakeet_capi_device_name (process-global, borrowed, valid for the life
+// of the process, "" on NULL ctx).
+const char* parakeet_capi_device_description(parakeet_ctx* ctx);
 
 // Transcribe a WAV file. `decoder` selects the head:
 //   0 = default (by arch: transducer for tdt/rnnt/hybrid, CTC for ctc),

@@ -52,8 +52,24 @@ public:
     int  n_threads() const { return n_threads_; }
 
     // Name of the selected compute device ("cpu" for the CPU backend, or the
-    // registry device name for a GPU backend, e.g. the CUDA device name).
+    // registry device name for a GPU backend, e.g. "Vulkan0", "CUDA0").
+    //
+    // This is a REGISTRY ORDINAL, not a physical device identity: it is the
+    // index of this device within whatever set ggml's backend currently
+    // considers visible, which is itself affected by backend-specific
+    // filtering (e.g. GGML_VK_VISIBLE_DEVICES for Vulkan). Restricting
+    // visibility to exactly one physical device always reports that device as
+    // ordinal 0 ("Vulkan0"), regardless of which physical device it is. Use
+    // device_description() to distinguish physical devices from one another.
     const char* device_name() const { return device_name_.c_str(); }
+
+    // Human-readable description of the selected compute device ("cpu" for
+    // the CPU backend, or the backend's own device string for a GPU, e.g.
+    // "NVIDIA GeForce RTX 3080" for Vulkan/CUDA). Unlike device_name(), this
+    // identifies the physical device rather than its position in a filtered
+    // registry, so it's the one to use for confirming WHICH GPU was actually
+    // selected rather than just GPU-vs-CPU.
+    const char* device_description() const { return device_description_.c_str(); }
 
     // The underlying CPU ggml backend. Exposed so the loader can give its weight
     // tensors a backend buffer over the SAME backend graphs run on (see
@@ -95,6 +111,7 @@ private:
     Impl* impl_;
     int   n_threads_ = 1;
     std::string device_name_ = "cpu";
+    std::string device_description_ = "cpu";
 };
 
 // Register a host-backed graph input for the currently-active Backend::compute
