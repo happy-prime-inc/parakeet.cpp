@@ -174,6 +174,11 @@ extern "C" const char* parakeet_capi_device_name(parakeet_ctx* ctx) {
     return pk::global_backend().device_name();
 }
 
+extern "C" const char* parakeet_capi_device_description(parakeet_ctx* ctx) {
+    if (!ctx) return "";
+    return pk::global_backend().device_description();
+}
+
 extern "C" char* parakeet_capi_transcribe_path_lang(parakeet_ctx* ctx,
                                                     const char* wav_path, int decoder,
                                                     const char* target_lang) {

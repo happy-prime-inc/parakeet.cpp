@@ -4,10 +4,10 @@
 #include <cstdlib>
 #include <cstring>
 
-// parakeet_capi_device_name (issue #149 / ABI v9): a caller that requested a
-// specific compute device via PARAKEET_DEVICE or GGML_VK_VISIBLE_DEVICES has
-// no other way to confirm the request was honored rather than silently
-// falling back to CPU.
+// parakeet_capi_device_name / parakeet_capi_device_description (issue #149 /
+// ABI v9): a caller that requested a specific compute device via
+// PARAKEET_DEVICE or GGML_VK_VISIBLE_DEVICES has no other way to confirm the
+// request was honored rather than silently falling back to CPU.
 //
 // Env:
 //   PARAKEET_TEST_GGUF   model weights (skip 77 if unset) — only the NULL-ctx
@@ -19,9 +19,11 @@ int main() {
         return 1;
     }
 
-    // NULL ctx must not crash, and returns "" like parakeet_capi_last_error.
-    const char* none = parakeet_capi_device_name(nullptr);
-    if (none == nullptr || std::strlen(none) != 0) {
+    // NULL ctx must not crash, and both return "" like parakeet_capi_last_error.
+    const char* none_name = parakeet_capi_device_name(nullptr);
+    const char* none_desc = parakeet_capi_device_description(nullptr);
+    if (none_name == nullptr || std::strlen(none_name) != 0 ||
+        none_desc == nullptr || std::strlen(none_desc) != 0) {
         std::fprintf(stderr, "test_capi_device_name: NULL ctx did not return \"\"\n");
         return 1;
     }
@@ -35,16 +37,19 @@ int main() {
         return 1;
     }
 
-    // Whatever device this build/machine selects, the name must be non-empty.
-    // A CI runner has no GPU, so this is "cpu" there; a GPU build/machine may
-    // report a registry device name instead — this test doesn't assume which.
+    // Whatever device this build/machine selects, both strings must be
+    // non-empty. A CI runner has no GPU, so both are "cpu" there; a GPU
+    // build/machine may report a registry ordinal and a physical device
+    // description instead — this test doesn't assume which.
     const char* name = parakeet_capi_device_name(ctx);
-    if (name == nullptr || std::strlen(name) == 0) {
-        std::fprintf(stderr, "test_capi_device_name: device name is empty\n");
+    const char* desc = parakeet_capi_device_description(ctx);
+    if (name == nullptr || std::strlen(name) == 0 ||
+        desc == nullptr || std::strlen(desc) == 0) {
+        std::fprintf(stderr, "test_capi_device_name: device name/description is empty\n");
         parakeet_capi_free(ctx);
         return 1;
     }
-    std::printf("test_capi_device_name: device = %s\n", name);
+    std::printf("test_capi_device_name: device = %s (%s)\n", name, desc);
 
     parakeet_capi_free(ctx);
     return 0;
