@@ -2,7 +2,7 @@ name: release shared libraries
 
 # A deliberately small release path for downstream FFI consumers. The regular
 # release workflow builds CLI/server bundles plus CPU, Metal, Vulkan, CUDA and
-# AppImage variants. This workflow builds only the four CPU/Metal shared
+# AppImage variants. This workflow builds only the seven CPU/Metal/Vulkan shared
 # libraries Classroom Captions ships, so refreshing its pinned native runtime
 # does not accidentally spend the full release matrix.
 #
@@ -21,7 +21,7 @@ on:
       release_tag:
         description: Release tag and artifact version
         required: true
-        default: v0.5.0-hp1
+        default: v0.5.0-hp3
         type: string
       publish:
         description: Create/update a draft release and upload the assets
@@ -41,8 +41,20 @@ jobs:
         include:
           - arch: x64
             runner: ubuntu-22.04
+            backend: cpu
+            cmake_args: ""
           - arch: arm64
             runner: ubuntu-22.04-arm
+            backend: cpu
+            cmake_args: ""
+          - arch: x64
+            runner: ubuntu-22.04
+            backend: vulkan
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            backend: vulkan
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -51,6 +63,26 @@ jobs:
         with:
           ref: ${{ inputs.source_ref }}
           submodules: recursive
+
+      - name: Install Vulkan SDK (LunarG, x64)
+        if: matrix.backend == 'vulkan' && matrix.arch == 'x64'
+        run: |
+          wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
+          sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list \
+            https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
+
+      - name: Install Vulkan (Ubuntu apt, arm64)
+        if: matrix.backend == 'vulkan' && matrix.arch == 'arm64'
+        # LunarG has no arm64 SDK repo. ggml's Vulkan backend needs, at build
+        # time, the loader/headers (libvulkan-dev), glslc from shaderc to compile
+        # the compute shaders, and the SPIR-V registry headers (spirv-headers) —
+        # all in the Ubuntu 24.04 archive. glslangValidator is not required.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev glslc spirv-headers
 
       - name: Configure shared C API library
         run: |
@@ -64,19 +96,22 @@ jobs:
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_SERVER=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
-            -DPARAKEET_VERSION="${version#v}"
+            -DPARAKEET_VERSION="${version#v}" \
+            ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Verify ABI and streaming exports
+      - name: Verify ABI, device reporting, and streaming exports
         run: |
           python3 - <<'PY'
           import ctypes
           lib = ctypes.CDLL("./build-shared/libparakeet.so")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 8
+          assert lib.parakeet_capi_abi_version() == 9
           for name in (
+              "parakeet_capi_device_name",
+              "parakeet_capi_device_description",
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
@@ -90,7 +125,7 @@ jobs:
       - name: Package
         id: package
         run: |
-          bundle="parakeet-${{ inputs.release_tag }}-lib-linux-cpu-${{ matrix.arch }}"
+          bundle="parakeet-${{ inputs.release_tag }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
           mkdir "$bundle"
           cp build-shared/libparakeet.so include/parakeet_capi.h LICENSE README.md "$bundle/"
           tar -czf "$bundle.tar.gz" "$bundle"
@@ -132,14 +167,16 @@ jobs:
       - name: Build
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
 
-      - name: Verify ABI and streaming exports
+      - name: Verify ABI, device reporting, and streaming exports
         run: |
           python3 - <<'PY'
           import ctypes
           lib = ctypes.CDLL("./build-shared/libparakeet.dylib")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 8
+          assert lib.parakeet_capi_abi_version() == 9
           for name in (
+              "parakeet_capi_device_name",
+              "parakeet_capi_device_description",
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
@@ -167,6 +204,16 @@ jobs:
           if-no-files-found: error
 
   windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            cmake_args: ""
+          - backend: vulkan
+            cmake_args: "-DPARAKEET_GGML_VULKAN=ON"
+    env:
+      VULKAN_VERSION: "1.4.321.1"
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -178,6 +225,15 @@ jobs:
 
       - name: Apply ggml patches with Git Bash
         run: bash scripts/apply_ggml_patches.sh
+
+      - name: Install Vulkan SDK
+        if: matrix.backend == 'vulkan'
+        shell: pwsh
+        run: |
+          curl.exe -L -o vulkan-sdk.exe "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Start-Process -Wait -FilePath .\vulkan-sdk.exe -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install'
+          "VULKAN_SDK=C:\VulkanSDK\$env:VULKAN_VERSION" | Out-File -Append $env:GITHUB_ENV
+          "C:\VulkanSDK\$env:VULKAN_VERSION\Bin" | Out-File -Append $env:GITHUB_PATH
 
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
@@ -194,19 +250,25 @@ jobs:
             -DPARAKEET_BUILD_CLI=OFF \
             -DPARAKEET_BUILD_SERVER=OFF \
             -DPARAKEET_BUILD_TESTS=OFF \
-            -DPARAKEET_VERSION="${version#v}"
+            -DPARAKEET_VERSION="${version#v}" \
+            ${{ matrix.cmake_args }}
 
       - name: Build
         run: cmake --build build-shared -j
 
-      - name: Verify ABI and streaming exports
+      - name: Verify ABI, device reporting, and streaming exports
         run: |
           python - <<'PY'
           import ctypes
+          import os
+          sdk = os.environ.get("VULKAN_SDK")
+          dll_dir = os.add_dll_directory(os.path.join(sdk, "Bin")) if sdk else None
           lib = ctypes.CDLL(r"build-shared\parakeet.dll")
           lib.parakeet_capi_abi_version.restype = ctypes.c_int
-          assert lib.parakeet_capi_abi_version() == 8
+          assert lib.parakeet_capi_abi_version() == 9
           for name in (
+              "parakeet_capi_device_name",
+              "parakeet_capi_device_description",
               "parakeet_capi_stream_begin",
               "parakeet_capi_stream_feed_json",
               "parakeet_capi_stream_finalize_json",
@@ -221,7 +283,7 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          $bundle = "parakeet-${{ inputs.release_tag }}-lib-win-cpu-x64"
+          $bundle = "parakeet-${{ inputs.release_tag }}-lib-win-${{ matrix.backend }}-x64"
           New-Item -ItemType Directory -Path $bundle | Out-Null
           Copy-Item build-shared/parakeet.dll,include/parakeet_capi.h,LICENSE,README.md $bundle/
           Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
@@ -284,6 +346,6 @@ jobs:
           if ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" --repo "$REPOSITORY" --draft \
               --target "$SOURCE_REF" --title "$RELEASE_TAG" \
-              --notes "ABI-7 shared libraries for downstream FFI consumers. The full parakeet.cpp release matrix can be dispatched later against this same tag."
+              --notes "ABI-9 CPU, Metal, and Vulkan shared libraries for downstream FFI consumers. The full parakeet.cpp release matrix can be dispatched later against this same tag."
           fi
           gh release upload "$RELEASE_TAG" --repo "$REPOSITORY" --clobber dist/*
