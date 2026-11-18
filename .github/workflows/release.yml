@@ -246,11 +246,12 @@ jobs:
           if-no-files-found: error
 
       # Shared C-API lib (issue #25): a separate build so the CLI bundle above
-      # stays a single self-contained binary. The CPU libraries are deliberately
-      # owned by release-shared-libs.yml; publishing them here too caused a tag
-      # build from an older commit to clobber the verified ABI-7 assets.
+      # stays a single self-contained binary. The CPU and Vulkan libraries are
+      # deliberately owned by release-shared-libs.yml; publishing them here too
+      # caused a tag build from an older commit to clobber the verified ABI-7
+      # assets, and a rebuild would invalidate that workflow's SHA256SUMS.
       - name: Configure (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
@@ -272,11 +273,11 @@ jobs:
             ${EXTRA:+"$EXTRA"}
 
       - name: Build (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         run: cmake --build build-shared -j"$(getconf _NPROCESSORS_ONLN)"
 
       - name: Package (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         id: pack_lib
         run: |
           BUNDLE="parakeet-${{ steps.ver.outputs.version }}-lib-linux-${{ matrix.backend }}-${{ matrix.arch }}"
@@ -292,7 +293,7 @@ jobs:
           echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
 
       - name: Upload shared C-API lib artifact
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack_lib.outputs.bundle }}
@@ -536,12 +537,13 @@ jobs:
           path: ${{ steps.pack.outputs.bundle }}.zip
           if-no-files-found: error
 
-      # The scoped workflow owns the Windows CPU library. Vulkan and CUDA
-      # shared libraries remain part of this full release matrix.
+      # The scoped workflow owns the Windows CPU and Vulkan libraries (and
+      # their SHA256SUMS entries). CUDA shared libraries remain part of this
+      # full release matrix.
       # WINDOWS_EXPORT_ALL_SYMBOLS (set in CMakeLists) makes the DLL export its
       # extern "C" entry points so ctypes/dlopen can find them.
       - name: Configure (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         env:
           CUDA_ARCHS: ${{ matrix.cuda_archs }}
         run: |
@@ -558,11 +560,11 @@ jobs:
             ${CUDA_ARCHS:+"-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS}"}
 
       - name: Build (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         run: cmake --build build-shared -j
 
       - name: Package (shared C-API lib)
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         id: pack_lib
         shell: pwsh
         run: |
@@ -573,7 +575,7 @@ jobs:
           "bundle=$bundle" | Out-File -Append $env:GITHUB_OUTPUT
 
       - name: Upload shared C-API lib artifact
-        if: matrix.backend != 'cpu'
+        if: matrix.backend != 'cpu' && matrix.backend != 'vulkan'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack_lib.outputs.bundle }}
