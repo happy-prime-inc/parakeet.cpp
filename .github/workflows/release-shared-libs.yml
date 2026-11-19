@@ -300,6 +300,11 @@ jobs:
     if: inputs.publish
     needs: [linux, macos, windows]
     runs-on: ubuntu-latest
+    # Serialize with the other release workflow's publish job for this tag, so
+    # two SHA256SUMS rebuilds cannot interleave and drop each other's assets.
+    concurrency:
+      group: release-assets-${{ inputs.release_tag }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -308,11 +313,6 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-
-      - name: Generate checksums
-        run: |
-          cd dist
-          sha256sum * | sort -k2 > SHA256SUMS
 
       - name: Create/update draft release
         env:
@@ -349,3 +349,17 @@ jobs:
               --notes "ABI-9 CPU, Metal, and Vulkan shared libraries for downstream FFI consumers. The full parakeet.cpp release matrix can be dispatched later against this same tag."
           fi
           gh release upload "$RELEASE_TAG" --repo "$REPOSITORY" --clobber dist/*
+
+          # Rebuild SHA256SUMS from every asset now on the release, not just
+          # the ones this run built: release.yml and release-shared-libs.yml
+          # both publish to the same tag, and either may replace the other's
+          # files. Each uploaded file must hash the same once downloaded back.
+          rm -rf published && mkdir published
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir published
+          rm -f published/SHA256SUMS
+          for f in dist/*; do
+            [ "$(basename "$f")" = SHA256SUMS ] && continue
+            cmp "$f" "published/$(basename "$f")"
+          done
+          (cd published && sha256sum * | sort -k2) > SHA256SUMS
+          gh release upload "$RELEASE_TAG" --repo "$REPOSITORY" --clobber SHA256SUMS
