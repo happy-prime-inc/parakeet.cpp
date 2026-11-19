@@ -305,7 +305,7 @@ jobs:
   # arm64 runner.
   # ---------------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -606,6 +606,11 @@ jobs:
     if: github.ref_type == 'tag'
     needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
+    # Serialize with the other release workflow's publish job for this tag, so
+    # two SHA256SUMS rebuilds cannot interleave and drop each other's assets.
+    concurrency:
+      group: release-assets-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -625,3 +630,17 @@ jobs:
               --title "$TAG" --notes "Pre-built binaries for $TAG"
           fi
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber dist/*
+
+          # Rebuild SHA256SUMS from every asset now on the release, not just
+          # the ones this run built: release.yml and release-shared-libs.yml
+          # both publish to the same tag, and either may replace the other's
+          # files. Each uploaded file must hash the same once downloaded back.
+          rm -rf published && mkdir published
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir published
+          rm -f published/SHA256SUMS
+          for f in dist/*; do
+            [ "$(basename "$f")" = SHA256SUMS ] && continue
+            cmp "$f" "published/$(basename "$f")"
+          done
+          (cd published && sha256sum * | sort -k2) > SHA256SUMS
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber SHA256SUMS
