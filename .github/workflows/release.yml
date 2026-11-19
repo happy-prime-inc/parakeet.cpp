@@ -305,7 +305,7 @@ jobs:
   # arm64 runner.
   # ---------------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 120
     strategy:
       fail-fast: false
